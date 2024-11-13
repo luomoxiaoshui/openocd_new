@@ -82,7 +82,9 @@ COMMAND_HANDLER(handler_version_command)
 	return ERROR_OK;//表示命令执行成功
 }
 
-/* 函数声明：
+/* 事件回调处理函数，用于处理与目标状态相关的事件（如GDB连接、断开和目标暂停）
+ * 它通过设置或检查target->verbose_halt_msg来决定是否显示详细的暂停信息
+ * 函数声明：
  * 这个函数被声明为静态（static），意味着它仅在当前文件范围内可见。它接收三个参数：
  * target: 指向目标（target）结构体的指针，代表当前正在调试的目标。
  * event: 一个枚举类型的值，表示发生的事件类型。
@@ -116,8 +118,10 @@ static int log_target_callback_event_handler(struct target *target,
 	return ERROR_OK;//返回ERROR_OK，表示处理成功
 }
 
+//初始化标志位：该布尔标志用于控制程序是否在启动时初始化
 static bool init_at_startup = true;
 
+/*禁用启动时的初始化，将init_at_startup设置为false*/
 COMMAND_HANDLER(handle_noinit_command)
 {
 	if (CMD_ARGC != 0)
@@ -126,26 +130,33 @@ COMMAND_HANDLER(handle_noinit_command)
 	return ERROR_OK;
 }
 
+/*
+ *命令处理函数，用于执行初始化
+*/
 /* OpenOCD can't really handle failure of this command. Patches welcome! :-) */
 COMMAND_HANDLER(handle_init_command)
 {
-
+        //检查参数数量
 	if (CMD_ARGC != 0)
-		return ERROR_COMMAND_SYNTAX_ERROR;
+		return ERROR_COMMAND_SYNTAX_ERROR; //语法错误
 
 	int retval;
+	//静态变量，用于记录是否已完成初始化。若已初始化，则直接返回成功
 	static int initialized;
 	if (initialized)
 		return ERROR_OK;
-
+        
 	initialized = 1;
 
+	//保存当前的jtag_poll_mask状态，以备后续恢复
 	bool save_poll_mask = jtag_poll_mask();
-
+        
+	//运行“target init”命令来初始化目标。如果失败，返回ERROR_FAIL
 	retval = command_run_line(CMD_CTX, "target init");
 	if (retval != ERROR_OK)
 		return ERROR_FAIL;
-
+        
+	//调用adapter_init来初始化调试适配器，并记录调试日志信息
 	retval = adapter_init(CMD_CTX);
 	if (retval != ERROR_OK) {
 		/* we must be able to set up the debug adapter */
@@ -158,13 +169,14 @@ COMMAND_HANDLER(handle_init_command)
 	 * for JTAG, it checks the list of configured TAPs against
 	 * what's discoverable, possibly with help from the platform's
 	 * JTAG event handlers.  (which require COMMAND_EXEC)
+         * 切换命令上下文模式为COMMAND_EXEC，然后运行“transport init”命令，确保传输层初始化成功
 	 */
 	command_context_mode(CMD_CTX, COMMAND_EXEC);
 
 	retval = command_run_line(CMD_CTX, "transport init");
 	if (retval != ERROR_OK)
 		return ERROR_FAIL;
-
+        //初始化DAP（调试访问端口），检查所有连接的目标状态
 	retval = command_run_line(CMD_CTX, "dap init");
 	if (retval != ERROR_OK)
 		return ERROR_FAIL;
@@ -212,6 +224,9 @@ COMMAND_HANDLER(handle_add_script_search_dir_command)
 	return ERROR_OK;
 }
 
+/*
+ *
+*/
 static const struct command_registration openocd_command_handlers[] = {
 	{
 		.name = "version",
