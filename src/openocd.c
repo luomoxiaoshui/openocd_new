@@ -375,9 +375,7 @@ static struct command_context *setup_command_handler(Jim_Interp *interp)
 	//返回初始化完成的 cmd_ctx，表示命令处理器设置完成
 	return cmd_ctx;
 }
-/* 
- *
-*/
+
 /** OpenOCD runtime meat that can become single-thread in future. It parse
  * commandline, reads configuration, sets up the target and starts server loop.
  * Commandline arguments are passed into this function from openocd_main().
@@ -415,12 +413,14 @@ static int openocd_thread(int argc, char *argv[], struct command_context *cmd_ct
 	}
 
 	/* 4、根据设置，在启动时执行初始化
- 	 *
-         */
+ 	 * 调用 server_init 初始化服务器，将命令上下文 cmd_ctx 传递给服务器
+         * 如果初始化失败，返回 ERROR_FAIL */
 	ret = server_init(cmd_ctx);
 	if (ret != ERROR_OK)
 		return ERROR_FAIL;
-
+        
+	/* 检查 init_at_startup 是否为 true，如果是，则运行 init 命令(即 command_run_line(cmd_ctx, "init"))，
+	 * 用于执行启动时的初始化。如果 init 命令执行失败，则调用 server_quit 并返回 ERROR_FAIL */
 	if (init_at_startup) {
 		ret = command_run_line(cmd_ctx, "init");
 		if (ret != ERROR_OK) {
@@ -429,76 +429,110 @@ static int openocd_thread(int argc, char *argv[], struct command_context *cmd_ct
 		}
 	}
         /* 5、进入服务器循环，处理调试客户端的请求
- 	 *
-         */
+ 	 * 调用 server_loop，进入服务器的主循环，等待和处理调试客户端的连接和请求
+         * 服务器循环会持续运行，直到接收到终止信号或出现错误 */
 	ret = server_loop(cmd_ctx);
         
 	/* 6、退出服务器循环，关闭服务器并返回退出状态
- 	 *
-         */
+ 	 * 退出服务器主循环后，调用 server_quit 来停止服务器，返回最后的退出信号
+         * 如果 server_quit 的返回值不是 ERROR_OK，则返回 last_signal，表示退出状态 */
 	int last_signal = server_quit();
 	if (last_signal != ERROR_OK)
 		return last_signal;
-
+        
+	/* 如果服务器循环的返回值 ret 不是 ERROR_OK，则返回 ERROR_FAIL，表示运行过程中发生了错误
+         * 如果没有错误，则返回 ERROR_OK，表示成功执行 */
 	if (ret != ERROR_OK)
 		return ERROR_FAIL;
 	return ERROR_OK;
 }
-
+/* 
+ *
+*/
 /* normally this is the main() function entry, but if OpenOCD is linked
  * into application, then this fn will not be invoked, but rather that
- * application will have it's own implementation of main(). */
+ * application will have it's own implementation of main(). 
+ * openocd_main 函数:负责初始化 OpenOCD 的各个子系统，运行主线程并在退出时进行清理
+ * 这是 OpenOCD 的主要入口函数
+ * 如果 OpenOCD 被作为库链接到另一个应用程序中，那么该应用程序会实现自己的 main 函数，而不是调用 openocd_main */
 int openocd_main(int argc, char *argv[])
 {
-	int ret;
-
-	/* initialize commandline interface */
+	int ret;  //ret 用于存储函数的返回状态
+        //1、初始化命令行接口、实用工具和 RTT 子系统
+	/* initialize commandline interface 
+         * 定义并初始化 cmd_ctx（命令上下文）用于管理命令系统。
+         * 调用 setup_command_handler 初始化命令接口和命令处理程序 */
 	struct command_context *cmd_ctx;
 
 	cmd_ctx = setup_command_handler(NULL);
 
+	/* 调用 util_init 初始化实用工具和 rtt_init 初始化 RTT（实时跟踪）子系统。
+         * 如果任一初始化失败，返回 EXIT_FAILURE */
 	if (util_init(cmd_ctx) != ERROR_OK)
 		return EXIT_FAILURE;
 
 	if (rtt_init() != ERROR_OK)
 		return EXIT_FAILURE;
-
+        
+	//输出日志信息，显示如何提交错误报告的链接
 	LOG_OUTPUT("For bug reports, read\n\t"
 		"http://openocd.org/doc/doxygen/bugs.html"
 		"\n");
-
+        //2、设置命令上下文模式并启动服务器所需的主机 OS 设置
+        /* 设置命令上下文模式为 COMMAND_CONFIG（配置模式），以便进行配置
+         * 设置命令输出处理程序，将输出处理委托给 configuration_output_handler 函数 */
 	command_context_mode(cmd_ctx, COMMAND_CONFIG);
 	command_set_output_handler(cmd_ctx, configuration_output_handler, NULL);
 
+	//调用 server_host_os_entry，用于在主机操作系统上初始化服务器所需的设置
 	server_host_os_entry();
 
-	/* Start the executable meat that can evolve into thread in future. */
+	//3、调用 openocd_thread 启动核心执行逻辑，包括解析命令行、读取配置、初始化目标和进入服务器循环
+	/* Start the executable meat that can evolve into thread in future. 
+         * 调用 openocd_thread 函数，启动 OpenOCD 的主要执行过程，
+	 * 包括命令行解析、配置读取、目标设置和服务器循环，该函数的返回值存储在 ret 中 */
 	ret = openocd_thread(argc, argv, cmd_ctx);
+
+	//4、清理各个子系统（如闪存、GDB 服务、TPIU/SWO、服务器、命令系统、DAP、适配器等）
+        /* 清理资源，依次释放：
+         *       flash_free_all_banks() 释放所有闪存资源。
+         *       gdb_service_free() 释放 GDB 服务资源。
+         *       arm_tpiu_swo_cleanup_all() 清理 ARM 的 TPIU/SWO 资源。
+         *       server_free() 释放服务器资源 */
 
 	flash_free_all_banks();
 	gdb_service_free();
 	arm_tpiu_swo_cleanup_all();
 	server_free();
-
+        
+        //注销所有注册的命令，并删除帮助命令，释放命令系统的相关资源
 	unregister_all_commands(cmd_ctx, NULL);
 	help_del_all_commands(cmd_ctx);
 
-	/* free all DAP and CTI objects */
+	/* free all DAP and CTI objects 
+         * 清理所有 DAP（调试访问端口）和 CTI（CoreSight 跟踪接口）相关对象，确保调试相关资源完全释放 */
 	arm_cti_cleanup_all();
 	dap_cleanup_all();
 
+        /* 调用 adapter_quit 退出适配器，释放调试适配器的资源。
+         * server_host_os_close 关闭主机操作系统相关的服务器设置，进行必要的清理操作 */
 	adapter_quit();
-
 	server_host_os_close();
 
 	/* Shutdown commandline interface */
+        //关闭命令行接口，释放命令上下文 cmd_ctx 及相关资源
 	command_exit(cmd_ctx);
+        
 
+        //调用 rtt_exit 清理 RTT 子系统，free_config 释放配置资源，确保所有加载的配置都被释放
 	rtt_exit();
 	free_config();
 
+	//退出日志系统，清理日志资源
 	log_exit();
 
+	//5、根据 openocd_thread 的返回状态决定退出状态
+	//检查 openocd_thread 的返回值
 	if (ret == ERROR_FAIL)
 		return EXIT_FAILURE;
 	else if (ret != ERROR_OK)
