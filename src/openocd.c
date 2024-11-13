@@ -13,8 +13,9 @@
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
-#endif
+#endif  //项目配置文件
 
+//openocd中所需的各种模块和组件，如JTAG接口、传输层、工具函数等
 #include "openocd.h"
 #include <jtag/adapter.h>
 #include <jtag/jtag.h>
@@ -37,6 +38,7 @@
 #include <strings.h>
 #endif
 
+//版本信息定义
 #ifdef PKGBLDDATE
 #define OPENOCD_VERSION	\
 	"Open On-Chip Debugger " VERSION RELSTR " (" PKGBLDDATE ")"
@@ -45,19 +47,27 @@
 	"Open On-Chip Debugger " VERSION RELSTR
 #endif
 
+/* 启动TCL脚本定义
+ * 将外部文件startup_tcl.inc包含到一个const char数组中，
+ * 表示为OpenOCD的启动TCL脚本内容 */
 static const char openocd_startup_tcl[] = {
 #include "startup_tcl.inc"
 0 /* Terminate with zero */
 };
 
 /* Give scripts and TELNET a way to find out what version this is */
+/* 命令处理器函数：用于处理版本命令 */
 COMMAND_HANDLER(handler_version_command)
 {
+	/* 版本字符串的初始化：
+	 * 定义了一个version_str字符串指针，并将其初始化为OPENOCD_VERSION，
+	 * 即默认的OpenOCD版本信息。*/
 	char *version_str = OPENOCD_VERSION;
 
+	/* 检查命令行参数的数量*/
 	if (CMD_ARGC > 1)
 		return ERROR_COMMAND_SYNTAX_ERROR;
-
+        /* 如果参数个数等于1，则进一步检查参数值。如果参数不是"git"，则返回 */
 	if (CMD_ARGC == 1) {
 		if (strcmp("git", CMD_ARGV[0]))
 			return ERROR_COMMAND_ARGUMENT_INVALID;
@@ -65,22 +75,34 @@ COMMAND_HANDLER(handler_version_command)
 		version_str = GITVERSION;
 	}
 
+	/* 打印版本信息:
+ 	 * 使用command_print函数将版本信息打印到命令行，具体显示的是version_str的值 */
 	command_print(CMD, "%s", version_str);
 
-	return ERROR_OK;
+	return ERROR_OK;//表示命令执行成功
 }
 
+/* 函数声明：
+ * 这个函数被声明为静态（static），意味着它仅在当前文件范围内可见。它接收三个参数：
+ * target: 指向目标（target）结构体的指针，代表当前正在调试的目标。
+ * event: 一个枚举类型的值，表示发生的事件类型。
+ * priv: 一个通用的指针，可以传递附加的上下文信息。 */
 static int log_target_callback_event_handler(struct target *target,
 	enum target_event event,
 	void *priv)
 {
 	switch (event) {
+		/* 当GDB连接到目标并启动时，将target->verbose_halt_msg设置为false，表示不显示详细的暂停信息 */
 		case TARGET_EVENT_GDB_START:
 			target->verbose_halt_msg = false;
 			break;
+                /* 当GDB断开连接时，将target->verbose_halt_msg设置为true，表示允许显示详细的暂停信息 */
 		case TARGET_EVENT_GDB_END:
 			target->verbose_halt_msg = true;
 			break;
+		/* 当目标被暂停时，检查target->verbose_halt_msg的值。
+		* 如果为true，则调用target_arch_state(target)，以便获取和显示目标架构的状态信息
+		* 注释提到“当调试器导致暂停时，不显示信息”。 */
 		case TARGET_EVENT_HALTED:
 			if (target->verbose_halt_msg) {
 				/* do not display information when debugger caused the halt */
@@ -91,7 +113,7 @@ static int log_target_callback_event_handler(struct target *target,
 			break;
 	}
 
-	return ERROR_OK;
+	return ERROR_OK;//返回ERROR_OK，表示处理成功
 }
 
 static bool init_at_startup = true;
