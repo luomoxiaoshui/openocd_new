@@ -176,7 +176,9 @@ COMMAND_HANDLER(handle_init_command)
 	retval = command_run_line(CMD_CTX, "transport init");
 	if (retval != ERROR_OK)
 		return ERROR_FAIL;
-        //初始化DAP（调试访问端口），检查所有连接的目标状态
+        
+	/* 初始化DAP（调试访问端口），检查所有连接的目标状态
+         * 如果target_examine检查失败，返回错误 */
 	retval = command_run_line(CMD_CTX, "dap init");
 	if (retval != ERROR_OK)
 		return ERROR_FAIL;
@@ -184,7 +186,8 @@ COMMAND_HANDLER(handle_init_command)
 	LOG_DEBUG("Examining targets...");
 	if (target_examine() != ERROR_OK)
 		LOG_DEBUG("target examination failed");
-
+        /* 切换命令模式为COMMAND_CONFIG并依次初始化flash、nand、pld等存储器组件，
+         * 确保每个组件正确配置 */
 	command_context_mode(CMD_CTX, COMMAND_CONFIG);
 
 	if (command_run_line(CMD_CTX, "flash init") != ERROR_OK)
@@ -197,86 +200,136 @@ COMMAND_HANDLER(handle_init_command)
 		return ERROR_FAIL;
 	command_context_mode(CMD_CTX, COMMAND_EXEC);
 
-	/* in COMMAND_EXEC, after target_examine(), only tpiu or only swo */
+	/* in COMMAND_EXEC, after target_examine(), only tpiu or only swo 
+         * 切换回COMMAND_EXEC模式，运行tpiu init命令
+         * 恢复之前的jtag_poll_mask状态，确保不影响后续操作 */
 	if (command_run_line(CMD_CTX, "tpiu init") != ERROR_OK)
 		return ERROR_FAIL;
 
 	jtag_poll_unmask(save_poll_mask);
 
-	/* initialize telnet subsystem */
+	/* initialize telnet subsystem 
+         * 初始化Telnet系统：将所有目标（all_targets）添加到GDB调试会话*/
 	gdb_target_add_all(all_targets);
 
+	/* 注册log_target_callback_event_handler事件回调函数
+         * 每当目标发生特定事件（如暂停、继续运行等）时，OpenOCD会调用这个回调函数
+	 * 这在调试过程中有助于记录和管理调试事件
+         */
 	target_register_event_callback(log_target_callback_event_handler, CMD_CTX);
 
+	/* 调用了command_run_line函数，执行名为_run_post_init_commands的命令
+         * 该命令可能包含一些自定义的后置初始化指令，用于在初始化完成后进一步配置或执行一些额外操作
+         * 如果命令执行失败，返回ERROR_FAIL */
 	if (command_run_line(CMD_CTX, "_run_post_init_commands") != ERROR_OK)
 		return ERROR_FAIL;
 
 	return ERROR_OK;
 }
 
+/* 命令处理器，用于处理add_script_search_dir命令
+ * 将一个用户指定的目录添加到 OpenOCD 的脚本搜索路径中，
+ * 以便在执行脚本时可以在该目录中查找文件 */
 COMMAND_HANDLER(handle_add_script_search_dir_command)
-{
-	if (CMD_ARGC != 1)
+{       
+	//检查参数数量，确保只有一个参数
+	if (CMD_ARGC != 1) 
 		return ERROR_COMMAND_SYNTAX_ERROR;
-
+        //add_script_search_dir将 CMD_ARGV[0] 指定的路径添加到脚本搜索路径中
 	add_script_search_dir(CMD_ARGV[0]);
 
+	//返回成功状态 ERROR_OK，表示操作完成
 	return ERROR_OK;
 }
 
-/*
- *
-*/
+/* 定义名为 openocd_command_handlers 的静态常量结构体数组，类型为 command_registration
+ * 列出了 OpenOCD 的一些命令及其对应的处理函数
+ * 每个数组元素代表一个命令，包含名称(命令的名称字符串)、处理函数(用于处理命令的函数指针)、
+ * 模式(表示该命令在哪种模式下有效，如COMMAND_ANY表示在任意模式下有效)、
+ * 帮助信息(描述命令的作用)和用法(描述命令的参数要求) */
 static const struct command_registration openocd_command_handlers[] = {
-	{
-		.name = "version",
-		.handler = handler_version_command,
-		.mode = COMMAND_ANY,
-		.help = "show program version",
-		.usage = "[git]",
+	/* version */
+        {
+		.name = "version", //表示显示版本信息的命令
+		.handler = handler_version_command, //用于处理 version 命令
+		.mode = COMMAND_ANY, //表示该命令可以在任何模式下执行
+		.help = "show program version", //说明该命令用于显示程序版本
+		.usage = "[git]" //表示该命令可选地接受一个参数 git
 	},
+        /* noinit */
 	{
-		.name = "noinit",
-		.handler = &handle_noinit_command,
-		.mode = COMMAND_CONFIG,
-		.help = "Prevent 'init' from being called at startup.",
-		.usage = ""
+		.name = "noinit", //用于在启动时阻止调用 init
+		.handler = &handle_noinit_command, //
+		.mode = COMMAND_CONFIG, //表示该命令仅在配置模式下有效
+		.help = "Prevent 'init' from being called at startup.", //
+		.usage = "" //表示没有参数
 	},
+        /* init */
 	{
-		.name = "init",
-		.handler = &handle_init_command,
-		.mode = COMMAND_ANY,
+		.name = "init", //用于初始化已配置的目标和服务器
+		.handler = &handle_init_command, //
+		.mode = COMMAND_ANY, //
 		.help = "Initializes configured targets and servers.  "
 			"Changes command mode from CONFIG to EXEC.  "
 			"Unless 'noinit' is called, this command is "
 			"called automatically at the end of startup.",
-		.usage = ""
+			//描述初始化过程的详细说明，解释在启动时该命令会自动调用，除非调用了 noinit
+		.usage = "" //表示不需要参数
 	},
+	/* add_script_search_dir */
 	{
-		.name = "add_script_search_dir",
+		.name = "add_script_search_dir", //用于添加一个目录到脚本搜索路径中
 		.handler = &handle_add_script_search_dir_command,
 		.mode = COMMAND_ANY,
 		.help = "dir to search for config files and scripts",
-		.usage = "<directory>"
+		.usage = "<directory>" //要求提供一个参数，指定要添加的目录
 	},
-	COMMAND_REGISTRATION_DONE
+	COMMAND_REGISTRATION_DONE  //结束标志，标识数组的结束，通常用于数组终止符
 };
 
+/* openocd_register_commands函数：用于在 OpenOCD 的命令系统中注册命令
+ * 这是一个静态函数 openocd_register_commands，它在当前文件范围内可见，不能在其他文件中访问
+ * 参数 cmd_ctx 是一个指向 command_context 结构的指针，用于表示命令上下文 */
 static int openocd_register_commands(struct command_context *cmd_ctx)
-{
+{       
+	/* 调用register_commands函数将 openocd_command_handlers中定义的命令注册到指定的命令上下文cmd_ctx中
+         * NULL 作为第二个参数传递，表示没有特定的父命令名称，即这些命令是顶层命令
+         * register_commands的返回值将作为openocd_register_commands的返回值，
+	 * 这样可以用于判断命令注册是否成功 */
 	return register_commands(cmd_ctx, NULL, openocd_command_handlers);
 }
 
+/* 声明了一个全局指针变量 global_cmd_ctx，类型为 struct command_context *，用于指向全局的命令上下文
+ * 用于存储和访问全局的命令上下文 */
 struct command_context *global_cmd_ctx;
 
+/* setup_command_handler 函数的主要作用是初始化命令上下文 cmd_ctx，
+ * 然后逐个注册子系统命令，
+ * 包括 OpenOCD 核心、GDB、日志、传输、适配器、目标、闪存等模块
+ * 通过这些命令注册，OpenOCD 实现了对各种功能和子系统的管理和控制 
+ * 函数 setup_command_handler 是一个静态函数，它在当前文件范围内可见
+ * 接收一个 Jim_Interp 类型的参数 interp，这是 OpenOCD 中的脚本解释器，用于解释和执行 TCL 脚本 */
 static struct command_context *setup_command_handler(Jim_Interp *interp)
-{
+{       
+	/* 1、初始化日志系统
+         * 首先调用 log_init() 初始化日志系统，然后输出调试信息，表示日志初始化完成 */
 	log_init();
 	LOG_DEBUG("log_init: complete");
-
+        
+	/* 2、初始化命令上下文
+         * 调用 command_init 函数初始化命令上下文 cmd_ctx，
+	 * 并传入启动 TCL 脚本 openocd_startup_tcl 和解释器 interp
+         * cmd_ctx 是 struct command_context 类型的指针，用于存储命令的上下文信息，
+	 * 初始化后可以用来注册和处理命令*/
 	struct command_context *cmd_ctx = command_init(openocd_startup_tcl, interp);
 
 	/* register subsystem commands */
+	/* 3、依次调用每个子系统的命令注册函数，注册命令
+         * 定义一个函数指针类型command_registrant_t，用于指向命令注册函数，接收struct command_context *参数
+         * command_registrants是一个常量数组，包含多个命令注册函数的地址。
+	 * 这些函数用于注册不同的子系统命令，如 OpenOCD 核心命令、服务器命令、GDB 命令、日志命令、
+         * 传输层命令、适配器命令、目标命令、闪存命令等。
+	 * 数组最后一个元素为 NULL，用于标记数组的结束 */
 	typedef int (*command_registrant_t)(struct command_context *cmd_ctx_value);
 	static const command_registrant_t command_registrants[] = {
 		&openocd_register_commands,
@@ -295,6 +348,9 @@ static struct command_context *setup_command_handler(Jim_Interp *interp)
 		&arm_tpiu_swo_register_commands,
 		NULL
 	};
+	/* 通过 for 循环遍历 command_registrants 数组，逐一调用每个注册函数，并将 cmd_ctx 作为参数传递
+         * 如果某个注册函数返回的值不等于 ERROR_OK，则表示注册失败，
+         * 此时调用 command_done 清理命令上下文 cmd_ctx，并返回 NULL 以终止初始化过程 */
 	for (unsigned int i = 0; command_registrants[i]; i++) {
 		int retval = (*command_registrants[i])(cmd_ctx);
 		if (retval != ERROR_OK) {
@@ -302,16 +358,25 @@ static struct command_context *setup_command_handler(Jim_Interp *interp)
 			return NULL;
 		}
 	}
+
+	/* 4、注册成功后，输出调试信息和版本信息
+         *
+         */
 	LOG_DEBUG("command registration: complete");
 
 	LOG_OUTPUT(OPENOCD_VERSION "\n"
 		"Licensed under GNU GPL v2\n");
 
+	/* 5、将命令上下文赋值给全局变量 global_cmd_ctx，并返回上下文指针 cmd_ctx
+         *
+         */
 	global_cmd_ctx = cmd_ctx;
 
 	return cmd_ctx;
 }
-
+/* 
+ *
+*/
 /** OpenOCD runtime meat that can become single-thread in future. It parse
  * commandline, reads configuration, sets up the target and starts server loop.
  * Commandline arguments are passed into this function from openocd_main().
