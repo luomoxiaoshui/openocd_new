@@ -360,18 +360,19 @@ static struct command_context *setup_command_handler(Jim_Interp *interp)
 	}
 
 	/* 4、注册成功后，输出调试信息和版本信息
-         *
-         */
+         *输出调试信息，表示命令注册已完成
+         * 打印 OpenOCD 的版本信息和 GPL v2 许可证声明，提示用户当前的程序版本和使用协议 */
 	LOG_DEBUG("command registration: complete");
 
 	LOG_OUTPUT(OPENOCD_VERSION "\n"
 		"Licensed under GNU GPL v2\n");
 
 	/* 5、将命令上下文赋值给全局变量 global_cmd_ctx，并返回上下文指针 cmd_ctx
-         *
+         * 将 cmd_ctx 指向的命令上下文赋值给全局变量 global_cmd_ctx，以便其他地方可以访问全局的命令上下文
          */
 	global_cmd_ctx = cmd_ctx;
-
+        
+	//返回初始化完成的 cmd_ctx，表示命令处理器设置完成
 	return cmd_ctx;
 }
 /* 
@@ -380,17 +381,30 @@ static struct command_context *setup_command_handler(Jim_Interp *interp)
 /** OpenOCD runtime meat that can become single-thread in future. It parse
  * commandline, reads configuration, sets up the target and starts server loop.
  * Commandline arguments are passed into this function from openocd_main().
- */
+ * 定义一个函数 openocd_thread，它是 OpenOCD 的核心运行函数。
+ * 它解析命令行参数，读取配置，设置目标，初始化目标系统和启动服务器循环
+ * 这个函数是 openocd_main 函数的一个辅助函数，接收命令行参数并执行主要的初始化和运行步骤 
+ * 函数 openocd_thread 是一个静态函数，仅在当前文件范围内可见
+ * 参数：argc 和 argv 是从命令行接收的参数数量和参数值
+ * cmd_ctx 是指向 command_context 结构的指针，用于存储和管理命令的上下文信息 */
 static int openocd_thread(int argc, char *argv[], struct command_context *cmd_ctx)
 {
 	int ret;
-
+	/* 1、解析命令行参数
+ 	 *调用 parse_cmdline_args 函数来解析命令行参数，这个函数将参数解析结果存储在 cmd_ctx 中
+         * 如果解析失败，函数立即返回 ERROR_FAIL */
 	if (parse_cmdline_args(cmd_ctx, argc, argv) != ERROR_OK)
 		return ERROR_FAIL;
-
+        /* 2、执行服务器预初始化
+ 	 * 调用 server_preinit 进行服务器的预初始化。预初始化阶段通常用于设置一些必要的环境或检查。
+         * 如果预初始化失败，则返回 ERROR_FAIL */
 	if (server_preinit() != ERROR_OK)
 		return ERROR_FAIL;
-
+        /* 3、解析配置文件，初始化服务器
+ 	 * 调用 parse_config_file 函数来解析配置文件，并将结果存储在 ret 中
+         * 如果返回值为 ERROR_COMMAND_CLOSE_CONNECTION，则调用 server_quit 退出服务器，
+         * 并返回 ERROR_OK，表示成功退出
+         * 如果解析失败（即 ret 不等于 ERROR_OK），也会调用 server_quit 并返回 ERROR_FAIL */
 	ret = parse_config_file(cmd_ctx);
 	if (ret == ERROR_COMMAND_CLOSE_CONNECTION) {
 		server_quit(); /* gdb server may be initialized by -c init */
@@ -400,6 +414,9 @@ static int openocd_thread(int argc, char *argv[], struct command_context *cmd_ct
 		return ERROR_FAIL;
 	}
 
+	/* 4、根据设置，在启动时执行初始化
+ 	 *
+         */
 	ret = server_init(cmd_ctx);
 	if (ret != ERROR_OK)
 		return ERROR_FAIL;
@@ -411,9 +428,14 @@ static int openocd_thread(int argc, char *argv[], struct command_context *cmd_ct
 			return ERROR_FAIL;
 		}
 	}
-
+        /* 5、进入服务器循环，处理调试客户端的请求
+ 	 *
+         */
 	ret = server_loop(cmd_ctx);
-
+        
+	/* 6、退出服务器循环，关闭服务器并返回退出状态
+ 	 *
+         */
 	int last_signal = server_quit();
 	if (last_signal != ERROR_OK)
 		return last_signal;
