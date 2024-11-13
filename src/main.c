@@ -28,5 +28,8 @@ int main(int argc, char *argv[])
 	setvbuf(stdout, NULL, _IONBF, 0);
 	setvbuf(stderr, NULL, _IONBF, 0);
 
-	return openocd_main(argc, argv);//实际执行openocd_main，并将返回值作为main的输出
+	/* 实际执行openocd_main，并将返回值作为main的输出，
+         * openocd_main位于src/openocd.c文件中，是核心函数，
+	 * 负责初始化和运行Openocd的主要功能 */
+	return openocd_main(argc, argv);
 }
