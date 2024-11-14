@@ -55,6 +55,11 @@ static const char openocd_startup_tcl[] = {
 0 /* Terminate with zero */
 };
 
+// handler和jim的区别：
+// 	用途：handler类用于OpenOCD内部命令处理器，Jim类用于OpenOCD的Jim TCL 脚本命令处理器
+//      接口类型：前者是COMMAND_HANDLE宏定义的命令处理器，后者是Jim TCL 命令接口函数
+//      适用环境：handler类用于OpenOCD的CLI命令系统，通过TELNET或控制台访问；Jim类用于OpenOCD的TCL脚本解释器环境
+//
 /* Give scripts and TELNET a way to find out what version this is */
 /* 命令处理器函数：用于处理版本命令 */
 COMMAND_HANDLER(handler_version_command)
@@ -80,6 +85,33 @@ COMMAND_HANDLER(handler_version_command)
 	command_print(CMD, "%s", version_str);
 
 	return ERROR_OK;//表示命令执行成功
+}
+
+//jim_version_command 是一个命令处理函数，返回 OpenOCD 的版本信息
+//接收三个参数：interp 是解释器对象，argc 是参数个数，argv 是参数数组
+static int jim_version_command(Jim_Interp *interp, int argc, Jim_Obj * const *argv)
+{
+    // 参数检查：如果传入的参数数量大于2，则返回错误 JIM_ERR
+    if (argc > 2) {
+        return JIM_ERR;
+    }
+    // 默认版本信息：OPENOCD_VERSION
+    const char *str = "";
+    version_str = OPENOCD_VERSION;
+
+    //如果传入了一个参数，则提取该参数
+    //如果参数为 "git"，则将 version_str 设置为 GITVERSION，即 Git 版本信息
+    if (argc == 2) {
+        str = Jim_GetString(argv[1], NULL);
+    }
+	
+    if (strcmp("git", str) == 0) {
+        version_str = GITVERSION;
+    }
+    //使用 Jim_SetResult 设置结果，将 version_str 作为输出返回给解释器
+    Jim_SetResult(interp, Jim_NewStringObj(interp, version_str, -1));
+
+    return JIM_OK;
 }
 
 /* 事件回调处理函数，用于处理与目标状态相关的事件（如GDB连接、断开和目标暂停）
