@@ -399,7 +399,7 @@ static const struct command_registration expr_handler[] = {
  * 调用 register_commands 函数，将 expr_handler 注册到指定的命令上下文 cmd_ctx 中, 
  * NULL 表示没有指定父命令 */
 
-返回值表示注册是否成功。
+//返回值表示注册是否成功。
 static int workaround_for_jimtcl_expr(struct command_context *cmd_ctx)
 {
 	return register_commands(cmd_ctx, NULL, expr_handler);

@@ -214,13 +214,22 @@ fail:
 	return ERROR_FAIL;
 }
 
+//命令处理函数：初始化通信传输方式
+//整个调试建立在dap结构体上，driver结构也在dap中，会把使用协议的结果传给dap框架，
+//当调到设备时，就知道使用的是哪种协议
 COMMAND_HANDLER(handle_transport_init)
-{
+{	
+	//打印调试信息，标明当前函数的执行状态
 	LOG_DEBUG("%s", __func__);
+	/* 检查当前会话是否已选择了传输方式
+	 * 如果为空，说明未配置传输方式
+	 * 此时，打印错误提示，告诉用户需要使用'transport select <transport>'选择传输方式
+	 */
 	if (!session) {
 		LOG_ERROR("session transport was not selected. Use 'transport select <transport>'");
 
 		/* no session transport configured, print transports then fail */
+		// 列出当前可用的传输方式
 		LOG_ERROR("Transports available:");
 		const char * const *vector = allowed_transports;
 		while (*vector) {
@@ -230,6 +239,7 @@ COMMAND_HANDLER(handle_transport_init)
 		return ERROR_FAIL;
 	}
 
+	//如果会话不为空，初始化结构体成员变量
 	return session->init(CMD_CTX);
 }
 
@@ -341,6 +351,7 @@ static const struct command_registration transport_commands[] = {
 	COMMAND_REGISTRATION_DONE
 };
 
+//transport命令注册信息数组
 static const struct command_registration transport_group[] = {
 	{
 		.name = "transport",

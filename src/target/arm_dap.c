@@ -26,9 +26,13 @@ extern struct adapter_driver *adapter_driver;
 
 /* DAP command support */
 struct arm_dap_object {
+	//链表头
 	struct list_head lh;
+	//包含DAP的具体信息，符合ARM ADIV5标准
 	struct adiv5_dap dap;
+	//DAP对象的名称
 	char *name;
+	//指向与DAP对象相关的SWD驱动接口
 	const struct swd_driver *swd;
 };
 
@@ -89,24 +93,43 @@ struct adiv5_dap *dap_instance_by_jim_obj(Jim_Interp *interp, Jim_Obj *o)
 	return NULL;
 }
 
+/* 初始化所有的调试访问端口DAP对象
+ * 这里将driver赋值给了dap；实现了dap对所有不同种类设备的赋值，包括含有driver的所有
+ * 设备，全部赋值给了dap->ops，后面只需操作dap->ops即可
+ * DAP（Debug Adapter Protocol）调试适配协议，用来对多种调试器进行抽象统一的适配层，
+ * 将原IDE和调试工具直接交互更改为和DAP进行交互，再由DAP与Adapter进行交互
+ */
 static int dap_init_all(void)
 {
 	struct arm_dap_object *obj;
 	int retval;
 
+	//初始化日志信息
 	LOG_DEBUG("Initializing all DAPs ...");
 
+	//遍历所有DAP对象
 	list_for_each_entry(obj, &all_dap, lh) {
 		struct adiv5_dap *dap = &obj->dap;
 
 		/* with hla, dap is just a dummy */
+		//判断当前传输是否为HLA，如果是，则当前DAP为虚拟的占位对象，直接跳过
 		if (transport_is_hla())
 			continue;
 
 		/* skip taps that are disabled */
+		//跳过禁用的tap
 		if (!dap->tap->enabled)
 			continue;
 
+		/* 判断传输协议
+		 * 根据传输协议选择合适的操作函数
+		 * adapter_driver是适配器驱动接口，通过不同的操作函数支持不同的调试协议
+		 * 如果是swd模式，设置dap->ops为swd_dap_ops，该结构体定义了DAP在SWD模式下的所有操作
+		 * 同时将驱动层的swd_ops赋值给obj->swd，用于后续的驱动调用
+		 * 如果是dapdirect_swd模式，设置dap->ops为适配器驱动中定义的dap_swd_ops
+		 * 如果是dapdirect_jtag模式，设置dap->ops为适配器驱动中定义的dap_jtag_ops
+		 * 如果没有符合的类型，则默认使用jtag_dp_ops
+		 */
 		if (transport_is_swd()) {
 			dap->ops = &swd_dap_ops;
 			obj->swd = adapter_driver->swd_ops;
@@ -117,6 +140,10 @@ static int dap_init_all(void)
 		} else
 			dap->ops = &jtag_dp_ops;
 
+		/* 设置ADIv5/ADIv6协议
+		 * 如果adi_version未指定，默认使用ADIv5协议
+		 * 如果配置文件中定义了adi_version，则使用指定的协议
+		 */
 		if (dap->adi_version == 0) {
 			LOG_DEBUG("DAP %s configured by default to use ADIv5 protocol", jtag_tap_name(dap->tap));
 			dap->adi_version = 5;
@@ -125,24 +152,32 @@ static int dap_init_all(void)
 				is_adiv6(dap) ? "ADIv6" : "ADIv5");
 		}
 
+		//连接DAP并执行初始化操作，如果连接失败，则返回错误
 		retval = dap->ops->connect(dap);
 		if (retval != ERROR_OK)
 			return retval;
-
+		
 		/* see if address size of ROM Table is greater than 32-bits */
+		/* 检查ROM表大小
+		 * 如果使用ADIv6协议，读取ROM表大小(地址宽度)
+		 */
 		if (is_adiv6(dap)) {
 			uint32_t dpidr1;
 
+			//使用queue_dp_read方法将读取DP_DPIDR1的操作放入队列
 			retval = dap->ops->queue_dp_read(dap, DP_DPIDR1, &dpidr1);
 			if (retval != ERROR_OK) {
 				LOG_ERROR("DAP read of DPIDR1 failed...");
 				return retval;
 			}
+			//使用dap_run执行队列中排队的命令
 			retval = dap_run(dap);
 			if (retval != ERROR_OK) {
 				LOG_ERROR("DAP read of DPIDR1 failed...");
 				return retval;
 			}
+			//提取地址信息大小
+			//DP_DPIDR1_ASIZE_MASK是一个掩码，用于提取dpidr1的ASIZE位域，存储到dap->asize中
 			dap->asize = dpidr1 & DP_DPIDR1_ASIZE_MASK;
 		}
 	}

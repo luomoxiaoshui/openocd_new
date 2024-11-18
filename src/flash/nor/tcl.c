@@ -55,6 +55,7 @@ COMMAND_HELPER(flash_command_get_bank, unsigned name_index,
 				    name_index, bank, true);
 }
 
+//检查和初始化Flash设备的驱动，并返回设备的基本信息或错误状态
 COMMAND_HANDLER(handle_flash_info_command)
 {
 	struct flash_bank *p;
@@ -63,9 +64,12 @@ COMMAND_HANDLER(handle_flash_info_command)
 	bool show_sectors = false;
 	bool prot_block_available;
 
+	//参数验证
 	if (CMD_ARGC < 1 || CMD_ARGC > 2)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 
+	//是否显示扇区信息
+	//如果提供了第二个参数且为sectors,设置show_sectors = true
 	if (CMD_ARGC == 2) {
 		if (strcmp("sectors", CMD_ARGV[1]) == 0)
 			show_sectors = true;
@@ -73,6 +77,7 @@ COMMAND_HANDLER(handle_flash_info_command)
 			return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
+	//获取Flash Bank
 	retval = CALL_COMMAND_HANDLER(flash_command_get_bank, 0, &p);
 	if (retval != ERROR_OK)
 		return retval;
@@ -82,12 +87,17 @@ COMMAND_HANDLER(handle_flash_info_command)
 		struct flash_sector *block_array;
 
 		/* attempt auto probe */
+		//自动检测Flash设备是否可以正常工作
 		retval = p->driver->auto_probe(p);
 		if (retval != ERROR_OK)
 			return retval;
 
 		/* If the driver does not implement protection, we show the default
 		 * state of is_protected array - usually protection state unknown */
+		/* 检查保护状态：
+		 * 如果驱动没有实现protect_check函数，默认不支持保护检查功能
+		 * 如果驱动实现了protect_check函数，则调用此函数检查Flash的保护状态
+		 */
 		if (!p->driver->protect_check) {
 			retval = ERROR_FLASH_OPER_UNSUPPORTED;
 		} else {
@@ -96,9 +106,13 @@ COMMAND_HANDLER(handle_flash_info_command)
 			if (retval != ERROR_OK && retval != ERROR_FLASH_OPER_UNSUPPORTED)
 				return retval;
 		}
+		//如果保护检查功能未实现，打印提示信息说明此功能不可用
 		if (retval == ERROR_FLASH_OPER_UNSUPPORTED)
 			LOG_INFO("Flash protection check is not implemented.");
-
+		
+		/* 打印Flash的基本信息：
+		 * Flash编号、driver名称、基地址、大小、总线宽度、芯片宽度
+		 */
 		command_print(CMD,
 			"#%u : %s at " TARGET_ADDR_FMT ", size 0x%8.8" PRIx32
 			", buswidth %u, chipwidth %u",
@@ -109,6 +123,10 @@ COMMAND_HANDLER(handle_flash_info_command)
 			p->bus_width,
 			p->chip_width);
 
+		/* 决定是否显示保护块或扇区信息
+		 * 如果用户未请求显示扇区信息且存在保护块，选择打印保护块信息
+		 * 否则，默认打印Flash的扇区信息
+		 */
 		prot_block_available = p->num_prot_blocks && p->prot_blocks;
 		if (!show_sectors && prot_block_available) {
 			block_array = p->prot_blocks;
@@ -118,6 +136,11 @@ COMMAND_HANDLER(handle_flash_info_command)
 			num_blocks = p->num_sectors;
 		}
 
+		/* 遍历并打印信息:
+		 * 1) 遍历所有选定的块
+		 * 2) 检查当前块的is_protected状态并设置保护状态：0为未保护，1为已保护，其他为未知
+		 * 3) 使用command_print输出以下信息：块编号、块的偏移地址、块大小(size)、块大小(KB)、保护状态
+		 */
 		for (j = 0; j < num_blocks; j++) {
 			char *protect_state = "";
 
@@ -137,6 +160,8 @@ COMMAND_HANDLER(handle_flash_info_command)
 				protect_state);
 		}
 
+		//调用驱动程序的额外信息接口
+		//如果驱动实现了info方法，调用该方法获取自定义的Flash信息
 		if (p->driver->info) {
 			/* Let the flash driver print extra custom info */
 			retval = p->driver->info(p, CMD);
@@ -149,18 +174,22 @@ COMMAND_HANDLER(handle_flash_info_command)
 	return retval;
 }
 
+//检测Flash设备
 COMMAND_HANDLER(handle_flash_probe_command)
 {
 	struct flash_bank *p;
 	int retval;
 
+	//参数检查
 	if (CMD_ARGC != 1)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 
+	//获取Flash Bank
 	retval = CALL_COMMAND_HANDLER(flash_command_get_bank_maybe_probe, 0, &p, false);
 	if (retval != ERROR_OK)
 		return retval;
-
+	
+	//检查获取的Flash Bank
 	if (p) {
 		retval = p->driver->probe(p);
 		if (retval == ERROR_OK)
@@ -176,17 +205,21 @@ COMMAND_HANDLER(handle_flash_probe_command)
 	return retval;
 }
 
+//检查Flash Bank的擦除状态功能
 COMMAND_HANDLER(handle_flash_erase_check_command)
 {
 	bool blank = true;
+	//参数检查
 	if (CMD_ARGC != 1)
 		return ERROR_COMMAND_SYNTAX_ERROR;
-
+	
+	//获取目标Flash Bank
 	struct flash_bank *p;
 	int retval = CALL_COMMAND_HANDLER(flash_command_get_bank, 0, &p);
 	if (retval != ERROR_OK)
 		return retval;
-
+	
+	//检查Flash的擦除状态：erase_check()
 	retval = p->driver->erase_check(p);
 	if (retval == ERROR_OK)
 		command_print(CMD, "successfully checked erase state");
@@ -198,6 +231,11 @@ COMMAND_HANDLER(handle_flash_erase_check_command)
 			p->base);
 	}
 
+	/* 遍历Flash Bank中每个扇区检查其擦除状态：
+	 * 如果状态为0，表示未擦除，打印状态为"not erased"
+	 * 如果状态为1，表示已擦除，跳过当前扇区
+	 * 如果状态未知(非0或1)，打印"erase state unknown"
+	 */
 	for (unsigned int j = 0; j < p->num_sectors; j++) {
 		char *erase_state;
 
@@ -209,6 +247,9 @@ COMMAND_HANDLER(handle_flash_erase_check_command)
 			erase_state = "erase state unknown";
 
 		blank = false;
+		/* 打印格式：
+		 * 扇区编号(#%i)、起始地址(0x%8.8" PRIx32)、大小(16进制和10进制表示，KB)、擦除状态
+		 */
 		command_print(CMD,
 			"\t#%3i: 0x%8.8" PRIx32 " (0x%" PRIx32 " %" PRIu32 "kB) %s",
 			j,
@@ -223,23 +264,28 @@ COMMAND_HANDLER(handle_flash_erase_check_command)
 	return retval;
 }
 
+//基于地址范围的Flash擦除功能
 COMMAND_HANDLER(handle_flash_erase_address_command)
-{
-	struct flash_bank *p;
-	int retval = ERROR_OK;
-	target_addr_t address;
-	uint32_t length;
-	bool do_pad = false;
-	bool do_unlock = false;
+{	
+	//参数初始化
+	struct flash_bank *p;   //指向目标Flash Bank的指针
+	int retval = ERROR_OK;  
+	target_addr_t address;  //起始地址
+	uint32_t length;   //擦除范围的长度
+	bool do_pad = false;   //是否需要对齐到扇区/块边界
+	bool do_unlock = false;  //是否需要在擦除前解锁
 	struct target *target = get_current_target(CMD_CTX);
 
+	//循环解析可选参数
 	while (CMD_ARGC >= 3) {
 		/* Optionally pad out the address range to block/sector
 		 * boundaries.  We can't know if there's data in that part
 		 * of the flash; only do padding if we're told to.
 		 */
+		 //pad:启用对齐擦除范围到扇区/块边界
 		if (strcmp("pad", CMD_ARGV[0]) == 0)
 			do_pad = true;
+		//unlock：启用擦除前的解锁操作
 		else if (strcmp("unlock", CMD_ARGV[0]) == 0)
 			do_unlock = true;
 		else
@@ -247,9 +293,12 @@ COMMAND_HANDLER(handle_flash_erase_address_command)
 		CMD_ARGC--;
 		CMD_ARGV++;
 	}
+	
+	//参数检查:起始地址＋擦除长度
 	if (CMD_ARGC != 2)
 		return ERROR_COMMAND_SYNTAX_ERROR;
-
+	
+	//解析地址和长度
 	COMMAND_PARSE_ADDRESS(CMD_ARGV[0], address);
 	COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], length);
 
@@ -258,23 +307,34 @@ COMMAND_HANDLER(handle_flash_erase_address_command)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	}
 
+	//获取Flash Bank
 	retval = get_flash_bank_by_addr(target, address, true, &p);
 	if (retval != ERROR_OK)
 		return retval;
 
 	/* We can't know if we did a resume + halt, in which case we no longer know the erased state
 	 **/
+	 //设置标志，表明Flash的擦除状态不再可靠
 	flash_set_dirty();
 
+	//初始化计时器
+	//定义并启动计时器，用于测量擦除操作的时间消耗
 	struct duration bench;
 	duration_start(&bench);
 
+	// 解锁地址范围(可选)
+	// flash_unlock_address_range：解锁指定范围地址
 	if (do_unlock)
 		retval = flash_unlock_address_range(target, address, length);
-
+	
+	// 执行擦除操作
+	// flash_erase_address_range:擦除指定的地址范围
+	// 如果do_pad为true,擦除范围将被自动扩展以对齐到扇区/块边界
 	if (retval == ERROR_OK)
 		retval = flash_erase_address_range(target, do_pad, address, length);
-
+	
+	//如果擦除成功，且测量时间无误：
+	//打印擦除的地址范围、长度、耗时以及擦除速度(KB/s)
 	if ((retval == ERROR_OK) && (duration_measure(&bench) == ERROR_OK)) {
 		command_print(CMD, "erased address " TARGET_ADDR_FMT " (length %" PRIu32 ")"
 			" in %fs (%0.3f KiB/s)", address, length,
@@ -284,21 +344,25 @@ COMMAND_HANDLER(handle_flash_erase_address_command)
 	return retval;
 }
 
+//实现擦除Flash中指定扇区范围的功能
 COMMAND_HANDLER(handle_flash_erase_command)
-{
+{	
+	//参数检查：命令、起始扇区、结束扇区
 	if (CMD_ARGC != 3)
 		return ERROR_COMMAND_SYNTAX_ERROR;
+	
+	//参数定义
+	uint32_t first;  //存储起始扇区索引
+	uint32_t last; //存储结束扇区索引
 
-	uint32_t first;
-	uint32_t last;
+	struct flash_bank *p; //指向目标Flash Bank的指针
+	int retval;  //用于存储函数调用的返回值
 
-	struct flash_bank *p;
-	int retval;
-
+	//调用Flash Bank检索函数：获取Flash Bank对象
 	retval = CALL_COMMAND_HANDLER(flash_command_get_bank, 0, &p);
 	if (retval != ERROR_OK)
 		return retval;
-
+		
 	COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], first);
 	if (strcmp(CMD_ARGV[2], "last") == 0)
 		last = p->num_sectors - 1;

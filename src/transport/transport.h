@@ -38,6 +38,7 @@ struct transport {
 	 * from among the alternatives.  Examples might include
 	 * "jtag", * "swd", "AVR_ISP" and more.
 	 */
+	 //传输协议名称
 	const char *name;
 
 	/**
@@ -48,6 +49,8 @@ struct transport {
 	 * After those commands are registered, they will often
 	 * be used for further configuration of the debug link.
 	 */
+	 //指向该传输方式选择方法的函数指针
+	 //用于注册与该传输方式相关的命令、激活该传输方式并完成必要的初始化(如复位)
 	int (*select)(struct command_context *ctx);
 
 	/**
@@ -55,6 +58,8 @@ struct transport {
 	 * configuration.  (For example, with JTAG this interrogates
 	 * the scan chain against the list of expected TAPs.)
 	 */
+	 //指向该传输方式初始化方法的函数指针
+	 //验证并初始化传输配置(如：对于JTAG可以扫描链是否与期望的TAP配置一致)
 	int (*init)(struct command_context *ctx);
 
 	/**
@@ -63,11 +68,13 @@ struct transport {
 	 *
 	 * @returns ERROR_OK on success, or an error code on failure.
 	 */
+	 //可选函数指针，用于传输方式在初始化前重载目标名称
 	int (*override_target)(const char **targetname);
 
 	/**
 	 * Transports are stored in a singly linked list.
 	 */
+	 //指向下一个传输方式的指针 
 	struct transport *next;
 };
 

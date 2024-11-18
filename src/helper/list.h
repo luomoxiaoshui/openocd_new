@@ -641,8 +641,11 @@ static inline void list_splice_tail_init(struct list_head *list,
  * @param member the name of the list_head within the struct.
  */
 #define list_for_each_entry(pos, head, member)				\
+	//获取链表中的第一个元素
 	for (pos = list_first_entry(head, typeof(*pos), member);	\
+		 //判断当前节点是否为链表的头节点(循环结束条件)
 	     !list_entry_is_head(pos, head, member);			\
+		 //获取当前节点的下一个节点
 	     pos = list_next_entry(pos, member))
 
 /**
