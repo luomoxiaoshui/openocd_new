@@ -244,6 +244,7 @@ struct adapter_driver *adapter_drivers[] = {
 #if BUILD_BCM2835GPIO == 1
 		&bcm2835gpio_adapter_driver,
 #endif
+//interfaces.c中struct adapter_driver *adapter_drivers[]数组定义各个adapter的具体驱动接口
 #if BUILD_CMSIS_DAP_USB == 1 || BUILD_CMSIS_DAP_HID == 1
 		&cmsis_dap_adapter_driver,
 #endif

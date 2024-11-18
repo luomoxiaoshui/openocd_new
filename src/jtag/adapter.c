@@ -42,13 +42,16 @@ enum adapter_clk_mode {
  * Adapter configuration
  */
 static struct {
-	bool adapter_initialized;
-	char *usb_location;
-	char *serial;
-	enum adapter_clk_mode clock_mode;
-	int speed_khz;
-	int rclk_fallback_speed_khz;
+	bool adapter_initialized; //调试器初始化标识
+	char *usb_location; // 存储调试器的USB位置
+	char *serial; //存储调试器的序列号
+	enum adapter_clk_mode clock_mode; //时钟模式枚举值
+	int speed_khz; //存储调试器的运行速率
+	//当自适应时钟不可用时降级使用固定速率
+	int rclk_fallback_speed_khz; 
+	// 存储所有GPIO引脚配置
 	struct adapter_gpio_config gpios[ADAPTER_GPIO_IDX_NUM];
+	//gpio初始化标识
 	bool gpios_initialized; /* Initialization of GPIOs to their unset values performed at run time */
 } adapter_config;
 
@@ -92,25 +95,34 @@ static void sync_adapter_reset_with_gpios(void)
 		adapter_config.gpios[ADAPTER_GPIO_IDX_TRST].drive = ADAPTER_GPIO_DRIVE_MODE_PUSH_PULL;
 }
 
+//初始化调试器GPIO配置
 static void adapter_driver_gpios_init(void)
 {
 	if (adapter_config.gpios_initialized)
 		return;
-
+	
+	//初始化每个gpio引脚的基本配置
 	for (int i = 0; i < ADAPTER_GPIO_IDX_NUM; ++i) {
+		//gpio_num和chip_num初始化为-1
 		adapter_config.gpios[i].gpio_num = -1;
 		adapter_config.gpios[i].chip_num = -1;
+		//输入方向
 		if (gpio_map[i].direction == ADAPTER_GPIO_DIRECTION_INPUT)
 			adapter_config.gpios[i].init_state = ADAPTER_GPIO_INIT_STATE_INPUT;
 	}
 
 	/* Drivers assume active low, and this is the normal behaviour for reset
 	 * lines so should be the default. */
+	//配置复位引脚
+	//设置SRST和TRST引脚为低电平有效(active_low = true)
 	adapter_config.gpios[ADAPTER_GPIO_IDX_SRST].active_low = true;
 	adapter_config.gpios[ADAPTER_GPIO_IDX_TRST].active_low = true;
+	//sync_adapter_reset_with_gpios：确保复位引脚和适配器引脚的GPIO同步
 	sync_adapter_reset_with_gpios();
 
 	/* JTAG GPIOs should be inactive except for tms */
+	//配置TMS引脚的初始状态
+	//将TMS引脚初始化为ADAPTER_GPIO_INIT_STATE_ACTIVE，以确保该引脚在初始化后处于激活状态
 	adapter_config.gpios[ADAPTER_GPIO_IDX_TMS].init_state = ADAPTER_GPIO_INIT_STATE_ACTIVE;
 
 	adapter_config.gpios_initialized = true;
@@ -140,10 +152,10 @@ int adapter_init(struct command_context *cmd_ctx)
 		return ERROR_JTAG_INVALID_INTERFACE;
 	}
     
-	//调试器接口初始化
+	//调试器接口初始化：
 	adapter_driver_gpios_init();
 
-	/* 设定调试器的默认时钟速率
+	/* 设定调试器的默认时钟速率：
 	 * 如果时钟模式未选定,记录警告信息
 	 * 调用adapter_config_khz设置默认时钟速率,单位为赫兹
 	 * 如果设置失败,返回ERROR_JTAG_INIT_FAILED
@@ -161,24 +173,38 @@ int adapter_init(struct command_context *cmd_ctx)
 			return ERROR_JTAG_INIT_FAILED;
 	}
 
-	/* 调试器驱动初始化
+	/* 调试器驱动初始化：
 	 * 如果初始化成功,设置adapter_config.adapter_initialized为true
+	 * adapter_driver
 	 */
 	retval = adapter_driver->init();
 	if (retval != ERROR_OK)
 		return retval;
 	adapter_config.adapter_initialized = true;
 
-	/* 检查调试器是否支持可配置速度
-	 * 如果调试器不支持可配置速度,记录
+	/* 检查调试器是否支持可配置速度：
+	 * 如果调试器不支持可配置速度,记录信息日志并返回ERROR
 	 */
 	if (!adapter_driver->speed) {
 		LOG_INFO("This adapter doesn't support configurable speed");
 		return ERROR_OK;
 	}
 
+	/* 获取用户配置的时钟速率并初始化变量：
+	 * adapter_get_speed_khz
+	 * requested_khz：用户设置的时钟速率
+	 * actual_khz：实际运行的时钟速率
+	 * 
+	 */
 	int requested_khz = adapter_get_speed_khz();
 	int actual_khz = requested_khz;
+
+	/* 设置调试器速度
+	 * speed_var：中间变量，用于调试器驱动的速度配置
+	 * adapter_get_speed根据当前配置的时钟模式，计算调试器的速率(kHz)
+	 * adapter_get_speed获取与调试器相关的速度配置参数，存入speed_var
+	 * 调用调试器驱动的speed，设置实际的时钟速率
+	 */
 	int speed_var = 0;
 	retval = adapter_get_speed(&speed_var);
 	if (retval != ERROR_OK)
@@ -186,17 +212,29 @@ int adapter_init(struct command_context *cmd_ctx)
 	retval = adapter_driver->speed(speed_var);
 	if (retval != ERROR_OK)
 		return retval;
+	
+	/* adapter_get_speed_readable：获取调试器实际的运行速率
+	 * actual_khz用于存储实际的时钟速率
+	 * 如果获取失败，记录日志，显示speed_var中的特定速率
+	 */
 	retval = adapter_get_speed_readable(&actual_khz);
 	if (retval != ERROR_OK)
 		LOG_INFO("adapter-specific clock speed value %d", speed_var);
 	else if (actual_khz) {
 		/* Adaptive clocking -- JTAG-specific */
+		/* 判断实际时钟速率是否可用
+		 * 自适应时钟(RCLK):
+		 * 	   如果当前配置为CLOCK_MODE_RCLK或CLOCK_MODE_KHZ且未请求具体的时钟速率，
+		 *     认为调试器不支持自适应时钟，此时，降级使用actual_khz固定速率，并记录日志
+		 * 固定时钟速率：如果配置支持固定时钟速率，则记录当前设置的时钟速率actual_khz，并打印日志
+		 */
 		if ((adapter_config.clock_mode == CLOCK_MODE_RCLK)
 				|| ((adapter_config.clock_mode == CLOCK_MODE_KHZ) && !requested_khz)) {
 			LOG_INFO("RCLK (adaptive clock speed) not supported - fallback to %d kHz"
 			, actual_khz);
 		} else
 			LOG_INFO("clock speed %d kHz", actual_khz);
+	//其他情况：记录当前模式为RCLK自适应时钟模式
 	} else
 		LOG_INFO("RCLK (adaptive clock speed)");
 
@@ -225,11 +263,13 @@ int adapter_quit(void)
 	return ERROR_OK;
 }
 
+//获取当前调试器的配置速率
 unsigned int adapter_get_speed_khz(void)
 {
 	return adapter_config.speed_khz;
 }
 
+//将以kHz表示的速率转化为调试器特定的速度值
 static int adapter_khz_to_speed(unsigned int khz, int *speed)
 {
 	LOG_DEBUG("convert khz to adapter specific speed value");
@@ -249,9 +289,12 @@ static int adapter_khz_to_speed(unsigned int khz, int *speed)
 	return ERROR_OK;
 }
 
+//将自适应时钟速率转换为(RCLK)转换为调试器特定的速度值
 static int adapter_rclk_to_speed(unsigned int fallback_speed_khz, int *speed)
 {
+	//尝试将0kHz转换为调试器速率
 	int retval = adapter_khz_to_speed(0, speed);
+	//如果失败，并且提供了回退速度，尝试使用回退速度
 	if ((retval != ERROR_OK) && fallback_speed_khz) {
 		LOG_DEBUG("trying fallback speed...");
 		retval = adapter_khz_to_speed(fallback_speed_khz, speed);
@@ -285,6 +328,7 @@ int adapter_config_rclk(unsigned int fallback_speed_khz)
 	return (retval != ERROR_OK) ? retval : adapter_set_speed(speed);
 }
 
+//根据当前配置的时钟模式，计算调试器的速率(kHz)
 int adapter_get_speed(int *speed)
 {
 	switch (adapter_config.clock_mode) {
@@ -301,6 +345,7 @@ int adapter_get_speed(int *speed)
 	return ERROR_OK;
 }
 
+//将调试器内部速度值，转化为可读的kHz
 int adapter_get_speed_readable(int *khz)
 {
 	int speed_var = 0;
