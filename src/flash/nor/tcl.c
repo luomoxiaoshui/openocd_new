@@ -351,7 +351,7 @@ COMMAND_HANDLER(handle_flash_erase_command)
 	if (CMD_ARGC != 3)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 	
-	//参数定义
+		//参数定义
 	uint32_t first;  //存储起始扇区索引
 	uint32_t last; //存储结束扇区索引
 
@@ -362,19 +362,23 @@ COMMAND_HANDLER(handle_flash_erase_command)
 	retval = CALL_COMMAND_HANDLER(flash_command_get_bank, 0, &p);
 	if (retval != ERROR_OK)
 		return retval;
-		
+	
+	//参数转换：将命令参数中的起始和结束索引解析为uint32_t类型并存储到first和last中
 	COMMAND_PARSE_NUMBER(u32, CMD_ARGV[1], first);
 	if (strcmp(CMD_ARGV[2], "last") == 0)
 		last = p->num_sectors - 1;
 	else
 		COMMAND_PARSE_NUMBER(u32, CMD_ARGV[2], last);
-
+	
+	//参数验证：
+	//验证起始扇区是否小于等于结束扇区
 	if (!(first <= last)) {
 		command_print(CMD, "ERROR: "
 			"first sector must be <= last");
 		return ERROR_FAIL;
 	}
 
+	//验证结束扇区索引是否小于或等于Flash的最大扇区索引
 	if (!(last <= (p->num_sectors - 1))) {
 		command_print(CMD, "ERROR: "
 			"last sector must be <= %u",
@@ -382,11 +386,14 @@ COMMAND_HANDLER(handle_flash_erase_command)
 		return ERROR_FAIL;
 	}
 
+	//初始化计时器：创建并启动一个计时器，用于记录擦除操作的时间
 	struct duration bench;
 	duration_start(&bench);
 
+	//擦除操作:擦除从first到last的所有扇区
 	retval = flash_driver_erase(p, first, last);
 
+	//输出擦除信息：如果擦除成功且计时器正常工作，打印擦除的起始和结束索引、
 	if ((retval == ERROR_OK) && (duration_measure(&bench) == ERROR_OK)) {
 		command_print(CMD, "erased sectors %" PRIu32 " "
 			"through %" PRIu32 " on flash bank %u "
@@ -1142,14 +1149,14 @@ static const struct command_registration flash_exec_command_handlers[] = {
 		.handler = handle_flash_probe_command,
 		.mode = COMMAND_EXEC,
 		.usage = "bank_id",
-		.help = "Identify a flash bank.",
+		.help = "Identify a flash bank.",  //确定一个flash bank的信息
 	},
 	{
 		.name = "info",
 		.handler = handle_flash_info_command,
 		.mode = COMMAND_EXEC,
 		.usage = "bank_id ['sectors']",
-		.help = "Print information about a flash bank.",
+		.help = "Print information about a flash bank.", //打印flash bank的信息
 	},
 	{
 		.name = "erase_check",
@@ -1157,14 +1164,14 @@ static const struct command_registration flash_exec_command_handlers[] = {
 		.mode = COMMAND_EXEC,
 		.usage = "bank_id",
 		.help = "Check erase state of all blocks in a "
-			"flash bank.",
+			"flash bank.", //检查所有的flash块是否被擦除
 	},
 	{
 		.name = "erase_sector",
 		.handler = handle_flash_erase_command,
 		.mode = COMMAND_EXEC,
 		.usage = "bank_id first_sector_num (last_sector_num|'last')",
-		.help = "Erase a range of sectors in a flash bank.",
+		.help = "Erase a range of sectors in a flash bank.", //擦除flash bank中指定范围的扇区
 	},
 	{
 		.name = "erase_address",
@@ -1177,16 +1184,16 @@ static const struct command_registration flash_exec_command_handlers[] = {
 			"address may be decreased, and length increased, so "
 			"that all of the first and last sectors are erased. "
 			"If 'unlock' is specified, then the flash is unprotected "
-			"before erasing.",
+			"before erasing.", //根据地址和长度擦除flash存储
 
 	},
 	{
-		.name = "filld",
+		.name = "filld",   //填充命令
 		.handler = handle_flash_fill_command,
 		.mode = COMMAND_EXEC,
 		.usage = "address value n",
 		.help = "Fill n double-words with 64-bit value, starting at "
-			"word address.  (No autoerase.)",
+			"word address.  (No autoerase.)", //使用64bit填充指定地址的Flash存储区域
 	},
 	{
 		.name = "fillw",
@@ -1194,7 +1201,7 @@ static const struct command_registration flash_exec_command_handlers[] = {
 		.mode = COMMAND_EXEC,
 		.usage = "address value n",
 		.help = "Fill n words with 32-bit value, starting at "
-			"word address.  (No autoerase.)",
+			"word address.  (No autoerase.)", //使用32bit填充指定地址的Flash存储区域
 	},
 	{
 		.name = "fillh",
@@ -1202,7 +1209,7 @@ static const struct command_registration flash_exec_command_handlers[] = {
 		.mode = COMMAND_EXEC,
 		.usage = "address value n",
 		.help = "Fill n halfwords with 16-bit value, starting at "
-			"word address.  (No autoerase.)",
+			"word address.  (No autoerase.)", //使用16bit填充指定地址的Flash存储区域
 	},
 	{
 		.name = "fillb",
@@ -1210,28 +1217,28 @@ static const struct command_registration flash_exec_command_handlers[] = {
 		.mode = COMMAND_EXEC,
 		.usage = "address value n",
 		.help = "Fill n bytes with 8-bit value, starting at "
-			"word address.  (No autoerase.)",
+			"word address.  (No autoerase.)", //使用8bit填充指定地址的Flash存储区域
 	},
 	{
-		.name = "mdb",
+		.name = "mdb",  //数据读取，从Flash中读取数据，以不同的粒度显示
 		.handler = handle_flash_md_command,
 		.mode = COMMAND_EXEC,
 		.usage = "address [count]",
-		.help = "Display bytes from flash.",
+		.help = "Display bytes from flash.", //按字节读取
 	},
 	{
 		.name = "mdh",
 		.handler = handle_flash_md_command,
 		.mode = COMMAND_EXEC,
 		.usage = "address [count]",
-		.help = "Display half-words from flash.",
+		.help = "Display half-words from flash.", //按半字读取(16位)
 	},
 	{
 		.name = "mdw",
 		.handler = handle_flash_md_command,
 		.mode = COMMAND_EXEC,
 		.usage = "address [count]",
-		.help = "Display words from flash.",
+		.help = "Display words from flash.", //按字读取(32位)
 	},
 	{
 		.name = "write_bank",
@@ -1239,7 +1246,8 @@ static const struct command_registration flash_exec_command_handlers[] = {
 		.mode = COMMAND_EXEC,
 		.usage = "bank_id filename [offset]",
 		.help = "Write binary data from file to flash bank. Allow optional "
-			"offset from beginning of the bank (defaults to zero).",
+			"offset from beginning of the bank (defaults to zero).", 
+			//将二进制数据从文件写入到指定的Flash Bank
 	},
 	{
 		.name = "write_image",
@@ -1248,7 +1256,8 @@ static const struct command_registration flash_exec_command_handlers[] = {
 		.usage = "[erase] [unlock] filename [offset [file_type]]",
 		.help = "Write an image to flash.  Optionally first unprotect "
 			"and/or erase the region to be used. Allow optional "
-			"offset from beginning of bank (defaults to zero)",
+			"offset from beginning of bank (defaults to zero)", 
+			//将镜像文件写入Flash，可以选择性擦除并解锁目标区域
 	},
 	{
 		.name = "verify_image",
@@ -1257,6 +1266,7 @@ static const struct command_registration flash_exec_command_handlers[] = {
 		.usage = "filename [offset [file_type]]",
 		.help = "Verify an image against flash. Allow optional "
 			"offset from beginning of bank (defaults to zero)",
+			//校验镜像文件与Flash数据是否一致
 	},
 	{
 		.name = "read_bank",
@@ -1265,6 +1275,7 @@ static const struct command_registration flash_exec_command_handlers[] = {
 		.usage = "bank_id filename [offset [length]]",
 		.help = "Read binary data from flash bank to file. Allow optional "
 			"offset from beginning of the bank (defaults to zero).",
+			//从指定的Flash Bank读取二进制数据，并保存到文件
 	},
 	{
 		.name = "verify_bank",
@@ -1273,7 +1284,7 @@ static const struct command_registration flash_exec_command_handlers[] = {
 		.usage = "bank_id filename [offset]",
 		.help = "Compare the contents of a file with the contents of the "
 			"flash bank. Allow optional offset from beginning of the bank "
-			"(defaults to zero).",
+			"(defaults to zero).", //比较文件内容和Flash Bank的数据
 	},
 	{
 		.name = "protect",
@@ -1283,11 +1294,11 @@ static const struct command_registration flash_exec_command_handlers[] = {
 			"('on'|'off')",
 		.help = "Turn protection on or off for a range of protection "
 			"blocks or sectors in a given flash bank. "
-			"See 'flash info' output for a list of blocks.",
+			"See 'flash info' output for a list of blocks.", //设置Flash Bank的保护状态
 	},
 	{
 		.name = "padded_value",
-		.handler = handle_flash_padded_value_command,
+		.handler = handle_flash_padded_value_command, //设置默认的Flash填充值
 		.mode = COMMAND_EXEC,
 		.usage = "bank_id value",
 		.help = "Set default flash padded value",

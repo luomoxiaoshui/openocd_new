@@ -26,6 +26,7 @@
 
 static struct flash_bank *flash_banks;
 
+//擦除函数：将擦除范围传递给具体的Flash驱动程序，并处理擦除结果
 int flash_driver_erase(struct flash_bank *bank, unsigned int first,
 		unsigned int last)
 {
