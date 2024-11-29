@@ -34,6 +34,8 @@
 #define ARM_CPUID_PARTNO_POS    4
 #define ARM_CPUID_PARTNO_MASK	(0xFFF << ARM_CPUID_PARTNO_POS)
 
+//枚举类型cortex_m_partno，用来表示不同的cortex_m核心部件编号，
+//这些编号通过读取ARM处理器的CPUID寄存器来识别具体的cortex_m核心型号
 enum cortex_m_partno {
 	CORTEX_M_PARTNO_INVALID,
 	STAR_MC1_PARTNO    = 0x132,
@@ -42,7 +44,7 @@ enum cortex_m_partno {
 	CORTEX_M3_PARTNO   = 0xC23,
 	CORTEX_M4_PARTNO   = 0xC24,
 	CORTEX_M7_PARTNO   = 0xC27,
-	CORTEX_M0P_PARTNO  = 0xC60,
+	CORTEX_M0P_PARTNO  = 0xC60,  //M0+
 	CORTEX_M23_PARTNO  = 0xD20,
 	CORTEX_M33_PARTNO  = 0xD21,
 	CORTEX_M35P_PARTNO = 0xD31,
@@ -202,20 +204,34 @@ enum cortex_m_isrmasking_mode {
 	CORTEX_M_ISRMASK_STEPONLY,
 };
 
+//用于存储Cortex-M核心调试和状态信息
 struct cortex_m_common {
+	//用于标识结构体的特定值
 	unsigned int common_magic;
 
+	//嵌套了ARMv7-M通用结构体armv7m_common，表示该结构体的基础部分继承了ARMv7通用功能
 	struct armv7m_common armv7m;
 
 	/* Context information */
+	//dcb_dhcsr：调试控制和状态寄存器，用于获取或设置Cortex-M的调试状态
+	//dcb_dhcsr_cumulated_sticky：累积的sticky标志，用于记录特定的调试状态
 	uint32_t dcb_dhcsr;
 	uint32_t dcb_dhcsr_cumulated_sticky;
 	/* DCB DHCSR has been at least once read, so the sticky bits have been reset */
+	//dcb_dhcsr_sticky_is_recent：表示sticky位是否在最近读取后被清除
 	bool dcb_dhcsr_sticky_is_recent;
+
+	//nvic_dfsr：调试故障状态寄存器，显示调试停止的原因
+	//nvic_icsr：中断控制和状态寄存器，显示当前激活或挂起的中断
 	uint32_t nvic_dfsr;  /* Debug Fault Status Register - shows reason for debug halt */
 	uint32_t nvic_icsr;  /* Interrupt Control State Register - shows active and pending IRQ */
 
 	/* Flash Patch and Breakpoint (FPB) */
+	/* fp_num_lit，fp_num_code：支持的字面量断点数量、代码断点数量
+	 * fp_rev：FPB模块的版本号，表示Flash Patch和断点单元的修订版本
+	 * fpb_enabled：FPB模块是否启用
+	 * fp_comparator_list：FPB比较器列表，用于设置断点
+	 */
 	unsigned int fp_num_lit;
 	unsigned int fp_num_code;
 	int fp_rev;
@@ -223,24 +239,36 @@ struct cortex_m_common {
 	struct cortex_m_fp_comparator *fp_comparator_list;
 
 	/* Data Watchpoint and Trace (DWT) */
+	/* dwt_num_comp,dwt_comp_available：支持的数据监视器数量，可用的监视器数量
+	 * dwt_devarch：DWT架构寄存器
+	 * dwt_comparator_list：DWT比较器列表，用于设置数据监视点
+	 * dwt_cache：与DWT相关的寄存器缓存
+	 */
 	unsigned int dwt_num_comp;
 	unsigned int dwt_comp_available;
 	uint32_t dwt_devarch;
 	struct cortex_m_dwt_comparator *dwt_comparator_list;
 	struct reg_cache *dwt_cache;
 
+	//soft_reset_config：软复位配置
 	enum cortex_m_soft_reset_config soft_reset_config;
+	//vectreset_supported：是否支持矢量表重置
 	bool vectreset_supported;
+	//isrmasking_mode：中断屏蔽模式
 	enum cortex_m_isrmasking_mode isrmasking_mode;
 
+	//存储Cortex-M核心相关的元信息，如架构和功能
 	const struct cortex_m_part_info *core_info;
 
+	//slow_register_read标志某些寄存器的读取较慢，需要轮询已确保数据就绪
 	bool slow_register_read;	/* A register has not been ready, poll S_REGRDY */
 
+	//AP的选择器，用于标识当前调试的目标
 	uint64_t apsel;
 
 	/* Whether this target has the erratum that makes C_MASKINTS not apply to
 	 * already pending interrupts */
+	//如果目标设备存在硬件缺陷，此标志为true
 	bool maskints_erratum;
 };
 
@@ -263,10 +291,12 @@ static inline bool is_cortex_m_with_dap_access(const struct cortex_m_common *cor
  * Use in target specific service routines, where the correct
  * type of arch_info is certain.
  */
-static inline struct cortex_m_common *
-target_to_cm(struct target *target)
+ /* target_to_cm：从target中获取包含Cortex-M相关数据的cortex_m_common结构体
+  * 使用container_of宏通过arch_info字段找到对应的结构
+  */
+static inline struct cortex_m_common *target_to_cm(struct target *target)
 {
-	return container_of(target->arch_info,
+	return (target->arch_info,
 			struct cortex_m_common, armv7m.arm);
 }
 
@@ -276,6 +306,7 @@ target_to_cm(struct target *target)
  * Use in a flash driver or any place where mismatch of the arch_info
  * type can happen.
  */
+ //将target对象转化为cortex_m_common类型的指针，同时确保目标是一个有效的cortex_m类型
 static inline struct cortex_m_common *
 target_to_cortex_m_safe(struct target *target)
 {

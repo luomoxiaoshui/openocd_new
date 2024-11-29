@@ -217,34 +217,51 @@ enum {
 
 #define ARMV7M_COMMON_MAGIC 0x2A452A45U
 
+//用于描述ARM Cortex-M系列的处理器相关数据和操作的核心结构体
 struct armv7m_common {
+	//common_magic：结构体标识符，用于校验是否正确初始化
 	unsigned int common_magic;
 
+	//arm：嵌套的ARM通用结构体，保存与ARM核心相关的通用信息
 	struct arm arm;
 
+	//exception_number：当前处理器执行的异常号，表示处理器正在处理的异常
 	int exception_number;
 
 	/* AP this processor is connected to in the DAP */
+	//debug_ap：指向一个adiv5_ap结构体，表示与处理器连接的调试访问端口(DAP)
 	struct adiv5_ap *debug_ap;
 
+	//fp_feature：用于标识浮点运算单元FPU的特性，如是否支持单精度/双精度
 	int fp_feature;
+	//demcr：调试异常和监控控制寄存器的值，用于调试相关设置
 	uint32_t demcr;
 
 	/* hla_target uses a high level adapter that does not support all functions */
+	//is_hla_target：表示该目标是否是hla_target，即使用高层调试器访问的目标，而不是直接访问寄存器
 	bool is_hla_target;
 
+	//trace_config：跟踪配置结构体，存储与调试跟踪相关的配置信息
 	struct armv7m_trace_config trace_config;
 
 	/* Direct processor core register read and writes */
+	/* load_core_reg_u32：从目标的核心寄存器中读取32位值
+	 * store_core_reg_u32：将32位值写入目标的核心寄存器
+	 */
 	int (*load_core_reg_u32)(struct target *target, uint32_t regsel, uint32_t *value);
 	int (*store_core_reg_u32)(struct target *target, uint32_t regsel, uint32_t value);
 
+	/* examine_debug_reason：检查目标停止时的调试原因
+	 * post_debug_entry：调试进入后的回调函数，用于执行额外的初始化或检查
+	 * pre_restore_context：恢复上下文前的操作，可以在断点或调试完成后调用
+	 */
 	int (*examine_debug_reason)(struct target *target);
 	int (*post_debug_entry)(struct target *target);
 
 	void (*pre_restore_context)(struct target *target);
 };
 
+//检查传入的armv7m_common结构体是否是有效的ARMv7-M目标，基于common_magic的值判断
 static inline bool is_armv7m(const struct armv7m_common *armv7m)
 {
 	return armv7m->common_magic == ARMV7M_COMMON_MAGIC;
@@ -256,6 +273,9 @@ static inline bool is_armv7m(const struct armv7m_common *armv7m)
  * Use in target specific service routines, where the correct
  * type of arch_info is certain.
  */
+ /* target_to_armv7m：从target中获取包含Cortex-M相关数据的armv7m_common结构体
+  * 使用container_of宏通过arch_info字段找到对应的armv7m_common结构
+  */
 static inline struct armv7m_common *
 target_to_armv7m(struct target *target)
 {

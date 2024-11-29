@@ -1054,12 +1054,19 @@ static inline bool is_ap_in_use(struct adiv5_ap *ap)
 	return ap->refcount > 0 || ap->config_ap_never_release;
 }
 
+//通过ADIv5或ADIv6的方式查找特定编号的调试访问端口，在找到AP后，将其编号和引用及计数返回
 static struct adiv5_ap *_dap_get_ap(struct adiv5_dap *dap, uint64_t ap_num)
-{
+{	
+	//检查AP编号是否有效
 	if (!is_ap_num_valid(dap, ap_num)) {
 		LOG_ERROR("Invalid AP#0x%" PRIx64, ap_num);
 		return NULL;
 	}
+	/* 如果是is_adiv6：
+	 * 遍历所有的DP_APSEL_MAX
+	 * 如果找到空闲或编号匹配的AP，则更新引用计数并返回
+	 * 如果没有空闲AP返回错误
+	 */
 	if (is_adiv6(dap)) {
 		for (unsigned int i = 0; i <= DP_APSEL_MAX; i++) {
 			struct adiv5_ap *ap = &dap->ap[i];
@@ -1068,6 +1075,7 @@ static struct adiv5_ap *_dap_get_ap(struct adiv5_dap *dap, uint64_t ap_num)
 				return ap;
 			}
 		}
+		//如果没有找到ap,再次遍历，尝试寻找
 		for (unsigned int i = 0; i <= DP_APSEL_MAX; i++) {
 			struct adiv5_ap *ap = &dap->ap[i];
 			if (!is_ap_in_use(ap)) {
@@ -1081,6 +1089,7 @@ static struct adiv5_ap *_dap_get_ap(struct adiv5_dap *dap, uint64_t ap_num)
 	}
 
 	/* ADIv5 */
+	//如果是ADIv5，直接使用数组dap->ap[]
 	struct adiv5_ap *ap = &dap->ap[ap_num];
 	ap->ap_num = ap_num;
 	++ap->refcount;
@@ -1088,6 +1097,7 @@ static struct adiv5_ap *_dap_get_ap(struct adiv5_dap *dap, uint64_t ap_num)
 }
 
 /* Return AP with specified ap_num. Increment AP refcount */
+//重载_dap_get_ap函数，实现AP查找，添加日志以显示获取到的AP信息
 struct adiv5_ap *dap_get_ap(struct adiv5_dap *dap, uint64_t ap_num)
 {
 	struct adiv5_ap *ap = _dap_get_ap(dap, ap_num);

@@ -2270,15 +2270,16 @@ static void cortex_m_dwt_free(struct target *target)
 	cm->dwt_cache = NULL;
 }
 
+//检查是否启用了调试授权状态寄存器
 static bool cortex_m_has_tz(struct target *target)
 {
-	struct armv7m_common *armv7m = target_to_armv7m(target);
+	struct armv7m_common *armv7m = target_to_armv7m(target);//将通用的target转化为Coretx-M通用结构armv7m_common
 	uint32_t dauthstatus;
 
-	if (armv7m->arm.arch != ARM_ARCH_V8M)
+	if (armv7m->arm.arch != ARM_ARCH_V8M) 
 		return false;
 
-	int retval = target_read_u32(target, DAUTHSTATUS, &dauthstatus);
+	int retval = target_read_u32(target, DAUTHSTATUS, &dauthstatus);  //读取调试授权状态寄存器
 	if (retval != ERROR_OK) {
 		LOG_WARNING("Error reading DAUTHSTATUS register");
 		return false;
@@ -2306,26 +2307,36 @@ static int cortex_m_find_mem_ap(struct adiv5_dap *swjdp,
 	return dap_find_get_ap(swjdp, AP_TYPE_AHB5_AP, debug_ap);
 }
 
+//初始化和检查目标设备的状态，并设置与调试有关的参数
 int cortex_m_examine(struct target *target)
-{
+{	
+	/* cpuid：用于存储芯片的CPUID  
+	 * fpcr, mvfr0, mvfr1：可能与浮点单元fpu支持的寄存器相关
+	 * cortex_m, armv7m：从目标设备中提取Cortex-M和ARMv7-M相关的结构体，便于后续操作
+	 * swjdp：ARMv7-M的调试接口结构体
+	 */
 	int retval;
-	uint32_t cpuid, fpcr, mvfr0, mvfr1;
+	uint32_t cpuid, fpcr, mvfr0, mvfr1; 
 	struct cortex_m_common *cortex_m = target_to_cm(target);
 	struct adiv5_dap *swjdp = cortex_m->armv7m.arm.dap;
 	struct armv7m_common *armv7m = target_to_armv7m(target);
 
 	/* hla_target shares the examine handler but does not support
 	 * all its calls */
+	/* MEM-AP初始化
+	 * 检查该目标是否是hla_target，调试接口debug_ap是否存在
+	 */
 	if (!armv7m->is_hla_target) {
 		if (!armv7m->debug_ap) {
-			if (cortex_m->apsel == DP_APSEL_INVALID) {
+			//检查并获取目标设备的调试接口MEM-AP
+			if (cortex_m->apsel == DP_APSEL_INVALID) {  //ap是否选择DP保留位
 				/* Search for the MEM-AP */
 				retval = cortex_m_find_mem_ap(swjdp, &armv7m->debug_ap);
 				if (retval != ERROR_OK) {
 					LOG_TARGET_ERROR(target, "Could not find MEM-AP to control the core");
 					return retval;
 				}
-			} else {
+			} else {  
 				armv7m->debug_ap = dap_get_ap(swjdp, cortex_m->apsel);
 				if (!armv7m->debug_ap) {
 					LOG_ERROR("Cannot get AP");
@@ -2334,22 +2345,25 @@ int cortex_m_examine(struct target *target)
 			}
 		}
 
-		armv7m->debug_ap->memaccess_tck = 8;
+		armv7m->debug_ap->memaccess_tck = 8;  //访问的时钟频率设为8
 
-		retval = mem_ap_init(armv7m->debug_ap);
+		retval = mem_ap_init(armv7m->debug_ap);   //DAP初始化
 		if (retval != ERROR_OK)
 			return retval;
 	}
 
-	if (!target_was_examined(target)) {
+	//判断目标设备是否已被检查过，如果没有则标记为已检查，否则直接返回
+	if (!target_was_examined(target)) {    
 		target_set_examined(target);
 
 		/* Read from Device Identification Registers */
+		//CPUID读取
 		retval = target_read_u32(target, CPUID, &cpuid);
 		if (retval != ERROR_OK)
 			return retval;
 
 		/* Get ARCH and CPU types */
+		//根据CPUID确定架构和CPU类型：遍历cortex_m_parts数组
 		const enum cortex_m_partno core_partno = (cpuid & ARM_CPUID_PARTNO_MASK) >> ARM_CPUID_PARTNO_POS;
 
 		for (unsigned int n = 0; n < ARRAY_SIZE(cortex_m_parts); n++) {
@@ -2359,18 +2373,23 @@ int cortex_m_examine(struct target *target)
 			}
 		}
 
+		//处理无法识别的处理器：记录错误日志，并返回失败
 		if (!cortex_m->core_info) {
 			LOG_TARGET_ERROR(target, "Cortex-M PARTNO 0x%x is unrecognized", core_partno);
 			return ERROR_FAIL;
 		}
 
+		//处理器检测和输出：将当前目标设备的架构信息从core_info复制到arm.arch，并输出
 		armv7m->arm.arch = cortex_m->core_info->arch;
 
 		LOG_TARGET_INFO(target, "%s r%" PRId8 "p%" PRId8 " processor detected",
 				cortex_m->core_info->name,
 				(uint8_t)((cpuid >> 20) & 0xf),
 				(uint8_t)((cpuid >> 0) & 0xf));
-
+		/* 修复Bug:
+		 * 如果目标处理器是Cortex-M7，检查其版本和补丁号
+		 * 针对版本为0且补丁号小于2的芯片，记录存在单步调试导致的硬件Bug
+		 */
 		cortex_m->maskints_erratum = false;
 		if (core_partno == CORTEX_M7_PARTNO) {
 			uint8_t rev, patch;
@@ -2383,11 +2402,15 @@ int cortex_m_examine(struct target *target)
 		}
 		LOG_TARGET_DEBUG(target, "cpuid: 0x%8.8" PRIx32 "", cpuid);
 
+		/* 检查和配置浮点运算单元,并读取相应的功能寄存器：
+		 * 如果处理器支持FPv4或FPv5浮点特性，则读取MVFR0和MVFR1寄存器，确认支持的具体的浮点特性
+		 */
 		if (cortex_m->core_info->flags & CORTEX_M_F_HAS_FPV4) {
 			target_read_u32(target, MVFR0, &mvfr0);
 			target_read_u32(target, MVFR1, &mvfr1);
 
 			/* test for floating point feature on Cortex-M4 */
+			//根据特定值匹配，判断Cortex-M4是否支持单精度浮点运算FPV4_SP
 			if ((mvfr0 == MVFR0_DEFAULT_M4) && (mvfr1 == MVFR1_DEFAULT_M4)) {
 				LOG_TARGET_DEBUG(target, "%s floating point feature FPv4_SP found", cortex_m->core_info->name);
 				armv7m->fp_feature = FPV4_SP;
@@ -2397,6 +2420,7 @@ int cortex_m_examine(struct target *target)
 			target_read_u32(target, MVFR1, &mvfr1);
 
 			/* test for floating point features on Cortex-M7 */
+			//根据寄存器的值的特定组合，进一步判断Cortex-M7支持的FPv5浮点特性，区分单精度/双精度
 			if ((mvfr0 == MVFR0_DEFAULT_M7_SP) && (mvfr1 == MVFR1_DEFAULT_M7_SP)) {
 				LOG_TARGET_DEBUG(target, "%s floating point feature FPv5_SP found", cortex_m->core_info->name);
 				armv7m->fp_feature = FPV5_SP;
@@ -2407,17 +2431,28 @@ int cortex_m_examine(struct target *target)
 		}
 
 		/* VECTRESET is supported only on ARMv7-M cores */
+		//判断是否支持vectreset功能(ARMv7-M )
 		cortex_m->vectreset_supported = armv7m->arm.arch == ARM_ARCH_V7M;
 
 		/* Check for FPU, otherwise mark FPU register as non-existent */
+		/* FPU初始化：
+		 * 检查是否存在浮点单元：如果fp_feature == FP_NONE，则将浮点寄存器标记为不存在(遍历所有)
+		 * 		
+		 */
 		if (armv7m->fp_feature == FP_NONE)
 			for (size_t idx = ARMV7M_FPU_FIRST_REG; idx <= ARMV7M_FPU_LAST_REG; idx++)
 				armv7m->arm.core_cache->reg_list[idx].exist = false;
-
+		
+		/* 检查是否启用了调试授权状态寄存器
+		 */
 		if (!cortex_m_has_tz(target))
 			for (size_t idx = ARMV8M_FIRST_REG; idx <= ARMV8M_LAST_REG; idx++)
 				armv7m->arm.core_cache->reg_list[idx].exist = false;
-
+		
+		/* 检查是否是hla_target：
+		 * 判断是否启用了自动地址自增功能
+		 * Cortex-M3/M4支持4kb的自动递增范围
+		 */
 		if (!armv7m->is_hla_target) {
 			if (cortex_m->core_info->flags & CORTEX_M_F_TAR_AUTOINCR_BLOCK_4K)
 				/* Cortex-M3/M4 have 4096 bytes autoincrement range,
@@ -2425,6 +2460,7 @@ int cortex_m_examine(struct target *target)
 				armv7m->debug_ap->tar_autoincr_block = (1 << 12);
 		}
 
+		//配置调试模块：确保调试功能启用，写入DCB_DHCSR寄存器激活调试接口
 		retval = target_read_u32(target, DCB_DHCSR, &cortex_m->dcb_dhcsr);
 		if (retval != ERROR_OK)
 			return retval;
@@ -2435,6 +2471,9 @@ int cortex_m_examine(struct target *target)
 		 *  As we are just initializing the debug system we do not need
 		 *  to call cortex_m_endreset_event() in the following poll.
 		 */
+		//dcb_dhcsr_sticky_is_recent：用于判断复位是否是最近发生的
+		//S_RESET_ST：调试状态寄存器的标志位，表示处理器是否曾经发生复位
+		//表明曾经发生过复位，但可以忽略，避免误判历史复位状态对当前调试的影响
 		if (!cortex_m->dcb_dhcsr_sticky_is_recent) {
 			cortex_m->dcb_dhcsr_sticky_is_recent = true;
 			if (cortex_m->dcb_dhcsr & S_RESET_ST) {
@@ -2442,8 +2481,16 @@ int cortex_m_examine(struct target *target)
 				cortex_m->dcb_dhcsr &= ~S_RESET_ST;
 			}
 		}
+		//将当前dhcsr的状态累计到sticky标志中，主要用于保留重要状态信息，便于后续调试逻辑使用
 		cortex_m_cumulate_dhcsr_sticky(cortex_m, cortex_m->dcb_dhcsr);
 
+		/* C_DEBUGEN是dhcsr的状态位，用于控制是否允许调试，若未设置，调试器将无法正常工作
+		 * 如果调试未启用，构造一个新的DHCSR：
+		 * 		设置C_DEBUGEN，开启调试
+		 *      清除C_HALT、C_STEP、C_MASKINTS
+		 *      写入dhcsr寄存器，使用DBGKEY作为解锁密钥
+		 *      更新本地dcb_dhcsr缓存
+		 */
 		if (!(cortex_m->dcb_dhcsr & C_DEBUGEN)) {
 			/* Enable debug requests */
 			uint32_t dhcsr = (cortex_m->dcb_dhcsr | C_DEBUGEN) & ~(C_HALT | C_STEP | C_MASKINTS);
@@ -2455,6 +2502,9 @@ int cortex_m_examine(struct target *target)
 		}
 
 		/* Configure trace modules */
+		/* 配置跟踪模块:
+		 * 通过向DCR_DEMCR寄存器写入启用调试模块，如果需要进一步配置ITM
+		 */
 		retval = target_write_u32(target, DCB_DEMCR, TRCENA | armv7m->demcr);
 		if (retval != ERROR_OK)
 			return retval;
@@ -2463,7 +2513,12 @@ int cortex_m_examine(struct target *target)
 			armv7m_trace_itm_config(target);
 
 		/* NOTE: FPB and DWT are both optional. */
-
+		/* 配置浮点运算单元FPU：
+		 * 读取FP_CTRL寄存器获取断点的数量
+		 * 根据读取的断点信息动态分配内存，存储断点比较器列表
+		 * 初始化断点状态，确保目标硬件上的断点清零
+		 * 如果检测到硬件的断点和补丁版本错误，发出警告日志
+		 */
 		/* Setup FPB */
 		target_read_u32(target, FP_CTRL, &fpcr);
 		/* bits [14:12] and [7:4] */
@@ -2491,10 +2546,15 @@ int cortex_m_examine(struct target *target)
 			cortex_m->fp_num_lit);
 
 		/* Setup DWT */
+		/* DWT配置：
+		 * 调用cortex_m_dwt_free完成DWT初始化
+		 * 确保在目标设备支持的情况下正确设置DWT
+		 */
 		cortex_m_dwt_free(target);
 		cortex_m_dwt_setup(cortex_m, target);
 
 		/* These hardware breakpoints only work for code in flash! */
+		//日志
 		LOG_TARGET_INFO(target, "target has %d breakpoints, %d watchpoints",
 			cortex_m->fp_num_code,
 			cortex_m->dwt_num_comp);
