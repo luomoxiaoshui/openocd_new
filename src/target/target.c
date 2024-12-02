@@ -1359,9 +1359,10 @@ int target_write_phys_memory(struct target *target,
 	return target->type->write_phys_memory(target, address, size, count, buffer);
 }
 
+//添加断点：目标设备暂停、硬件断点
 int target_add_breakpoint(struct target *target,
 		struct breakpoint *breakpoint)
-{
+{   
 	if ((target->state != TARGET_HALTED) && (breakpoint->type != BKPT_HARD)) {
 		LOG_WARNING("target %s is not halted (add breakpoint)", target_name(target));
 		return ERROR_TARGET_NOT_HALTED;

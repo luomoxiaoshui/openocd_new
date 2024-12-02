@@ -1721,12 +1721,18 @@ static int gdb_step_continue_packet(struct connection *connection,
 	return retval;
 }
 
+/* 解析gdb发来的断点或监视断点的数据包，根据数据包内容配置目标设备的断点、观察点
+ * connection：与gdb客户端连接的结构体
+ * packet：gdb发来的数据包的内容
+ * packet_size：数据包的大小
+ */
 static int gdb_breakpoint_watchpoint_packet(struct connection *connection,
 		char const *packet, int packet_size)
-{
-	struct target *target = get_target_from_connection(connection);
+{	
+	//初始化：获取目标设备、软件断点、读观察点
+	struct target *target = get_target_from_connection(connection); 
 	int type;
-	enum breakpoint_type bp_type = BKPT_SOFT /* dummy init to avoid warning */;
+	enum breakpoint_type bp_type = BKPT_SOFT /* dummy init to avoid warning */; 
 	enum watchpoint_rw wp_type = WPT_READ /* dummy init to avoid warning */;
 	uint64_t address;
 	uint32_t size;
@@ -1735,6 +1741,8 @@ static int gdb_breakpoint_watchpoint_packet(struct connection *connection,
 
 	LOG_DEBUG("[%s]", target_name(target));
 
+	//解析数据包类型：第一个字段
+	//strtoul字符串转化成16进制
 	type = strtoul(packet + 1, &separator, 16);
 
 	if (type == 0)	/* memory breakpoint */
@@ -1752,47 +1760,51 @@ static int gdb_breakpoint_watchpoint_packet(struct connection *connection,
 		return ERROR_SERVER_REMOTE_CLOSED;
 	}
 
+	//如果配置启用了断点类型重写，则将断点类型强制设置为gdb_breakpoint_override_type
 	if (gdb_breakpoint_override && ((bp_type == BKPT_SOFT) || (bp_type == BKPT_HARD)))
 		bp_type = gdb_breakpoint_override_type;
-
+	
+	//检查数据包格式：数据包字段应使用，分割
 	if (*separator != ',') {
 		LOG_ERROR("incomplete breakpoint/watchpoint packet received, dropping connection");
 		return ERROR_SERVER_REMOTE_CLOSED;
 	}
 
+	//解析断点、监视断点地址
 	address = strtoull(separator + 1, &separator, 16);
 
 	if (*separator != ',') {
 		LOG_ERROR("incomplete breakpoint/watchpoint packet received, dropping connection");
 		return ERROR_SERVER_REMOTE_CLOSED;
 	}
-
+	
+	//解析断点、监视断点大小
 	size = strtoul(separator + 1, &separator, 16);
 
 	switch (type) {
 		case 0:
-		case 1:
-			if (packet[0] == 'Z') {
+		case 1:  /* hardware breakpoint */
+			if (packet[0] == 'Z') {  //添加断点
 				retval = breakpoint_add(target, address, size, bp_type);
-				if (retval == ERROR_NOT_IMPLEMENTED) {
+				if (retval == ERROR_NOT_IMPLEMENTED) {   //当前目标设备不支持断点类型
 					/* Send empty reply to report that breakpoints of this type are not supported */
-					gdb_put_packet(connection, "", 0);
+					gdb_put_packet(connection, "", 0);  //返回空响应
 				} else if (retval != ERROR_OK) {
 					retval = gdb_error(connection, retval);
 					if (retval != ERROR_OK)
 						return retval;
 				} else
 					gdb_put_packet(connection, "OK", 2);
-			} else {
+			} else {     //移除断点
 				breakpoint_remove(target, address);
 				gdb_put_packet(connection, "OK", 2);
 			}
 			break;
 		case 2:
 		case 3:
-		case 4:
+		case 4:  /* access watchpoint */
 		{
-			if (packet[0] == 'Z') {
+			if (packet[0] == 'Z') {  //添加监视断点：地址、大小、类型、起始掩码、结束掩码
 				retval = watchpoint_add(target, address, size, wp_type, 0, 0xffffffffu);
 				if (retval == ERROR_NOT_IMPLEMENTED) {
 					/* Send empty reply to report that watchpoints of this type are not supported */

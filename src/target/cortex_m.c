@@ -1589,6 +1589,7 @@ static int cortex_m_deassert_reset(struct target *target)
 	return ERROR_OK;
 }
 
+//设置断点
 int cortex_m_set_breakpoint(struct target *target, struct breakpoint *breakpoint)
 {
 	int retval;
@@ -1596,12 +1597,15 @@ int cortex_m_set_breakpoint(struct target *target, struct breakpoint *breakpoint
 	struct cortex_m_common *cortex_m = target_to_cm(target);
 	struct cortex_m_fp_comparator *comparator_list = cortex_m->fp_comparator_list;
 
+	//检查断点是否已设置
 	if (breakpoint->is_set) {
 		LOG_TARGET_WARNING(target, "breakpoint (BPID: %" PRIu32 ") already set", breakpoint->unique_id);
 		return ERROR_OK;
 	}
 
+	//硬件断点检查：
 	if (breakpoint->type == BKPT_HARD) {
+		//comparator_list存储硬件断点资源,遍历comparator_list列表，查找未使用的断点槽位
 		uint32_t fpcr_value;
 		while (comparator_list[fp_num].used && (fp_num < cortex_m->fp_num_code))
 			fp_num++;
@@ -1610,6 +1614,8 @@ int cortex_m_set_breakpoint(struct target *target, struct breakpoint *breakpoint
 			return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
 		}
 		breakpoint_hw_set(breakpoint, fp_num);
+
+		//地址处理：Cortex-M的FPB不支持超过0x1FFFFFFE的地址
 		fpcr_value = breakpoint->address | 1;
 		if (cortex_m->fp_rev == 0) {
 			if (breakpoint->address > 0x1FFFFFFF) {
@@ -1617,13 +1623,15 @@ int cortex_m_set_breakpoint(struct target *target, struct breakpoint *breakpoint
 						"cannot handle HW breakpoint above address 0x1FFFFFFE");
 				return ERROR_FAIL;
 			}
+			//计算FPCR寄存器值，0x2决定用高位/低位比较
 			uint32_t hilo;
 			hilo = (breakpoint->address & 0x2) ? FPCR_REPLACE_BKPT_HIGH : FPCR_REPLACE_BKPT_LOW;
-			fpcr_value = (fpcr_value & 0x1FFFFFFC) | hilo | 1;
+			fpcr_value = (fpcr_value & 0x1FFFFFFC) | hilo | 1; //最低位设为1使能
 		} else if (cortex_m->fp_rev > 1) {
 			LOG_TARGET_ERROR(target, "Unhandled Cortex-M Flash Patch Breakpoint architecture revision");
 			return ERROR_FAIL;
 		}
+		//写入硬件断点寄存器：
 		comparator_list[fp_num].used = true;
 		comparator_list[fp_num].fpcr_value = fpcr_value;
 		target_write_u32(target, comparator_list[fp_num].fpcr_address,
@@ -1641,29 +1649,31 @@ int cortex_m_set_breakpoint(struct target *target, struct breakpoint *breakpoint
 
 			cortex_m->fpb_enabled = true;
 		}
-	} else if (breakpoint->type == BKPT_SOFT) {
+	} else if (breakpoint->type == BKPT_SOFT) {  //生成软件断点指令
 		uint8_t code[4];
 
 		/* NOTE: on ARMv6-M and ARMv7-M, BKPT(0xab) is used for
 		 * semihosting; don't use that.  Otherwise the BKPT
 		 * parameter is arbitrary.
+		 * ARMV5_T_BKPT(0x11)：ARM指令集中的断点指令，用于触发调试事件
 		 */
 		buf_set_u32(code, 0, 32, ARMV5_T_BKPT(0x11));
 		retval = target_read_memory(target,
 				breakpoint->address & 0xFFFFFFFE,
 				breakpoint->length, 1,
-				breakpoint->orig_instr);
+				breakpoint->orig_instr); //在写入断点指令前，保存断点地址的原始指令
 		if (retval != ERROR_OK)
 			return retval;
 		retval = target_write_memory(target,
 				breakpoint->address & 0xFFFFFFFE,
 				breakpoint->length, 1,
-				code);
+				code);  //将断点指令写入目标地址
 		if (retval != ERROR_OK)
 			return retval;
 		breakpoint->is_set = true;
 	}
 
+	//打印断点信息：断点ID、断点类型、断点地址、断点指令长度
 	LOG_TARGET_DEBUG(target, "BPID: %" PRIu32 ", Type: %d, Address: " TARGET_ADDR_FMT " Length: %d (n=%u)",
 		breakpoint->unique_id,
 		(int)(breakpoint->type),

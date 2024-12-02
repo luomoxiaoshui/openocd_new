@@ -24,16 +24,16 @@ enum watchpoint_rw {
 };
 
 struct breakpoint {
-	target_addr_t address;
-	uint32_t asid;
-	int length;
-	enum breakpoint_type type;
-	bool is_set;
-	unsigned int number;
-	uint8_t *orig_instr;
-	struct breakpoint *next;
-	uint32_t unique_id;
-	int linked_brp;
+	target_addr_t address;  //断点地址
+	uint32_t asid;   //地址空间标识符，用于区分不同的进程地址空间
+	int length;  //断点覆盖的指令长度
+	enum breakpoint_type type;  //断点类型
+	bool is_set;  //标志断点是否已实际设置到目标设备
+	unsigned int number;   //硬件断点编号
+	uint8_t *orig_instr;   //保存断点覆盖区域的原始指令内容
+	struct breakpoint *next;  //指向下一个断点的指针，用于链表的管理
+	uint32_t unique_id;    //唯一标识符，用于区分不同的断点
+	int linked_brp;   //链接到的断点寄存器编号，仅适用于硬件断点
 };
 
 struct watchpoint {

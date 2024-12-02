@@ -31,6 +31,7 @@ static const char * const watchpoint_rw_strings[] = {
 /* monotonic counter/id-number for breakpoints and watch points */
 static int bpwp_unique_id;
 
+//添加断点
 static int breakpoint_add_internal(struct target *target,
 	target_addr_t address,
 	uint32_t length,
@@ -41,7 +42,7 @@ static int breakpoint_add_internal(struct target *target,
 	const char *reason;
 	int retval;
 
-	while (breakpoint) {
+	while (breakpoint) {  //遍历目标设备上的断点链表，检查断点地址是否重复
 		if (breakpoint->address == address) {
 			/* FIXME don't assume "same address" means "same
 			 * breakpoint" ... check all the parameters before
@@ -55,16 +56,18 @@ static int breakpoint_add_internal(struct target *target,
 		breakpoint = breakpoint->next;
 	}
 
-	(*breakpoint_p) = malloc(sizeof(struct breakpoint));
+	//分配新的断点结构体
+	(*breakpoint_p) = malloc(sizeof(struct breakpoint)); //动态分配内存，用于存储新的断点信息
 	(*breakpoint_p)->address = address;
 	(*breakpoint_p)->asid = 0;
 	(*breakpoint_p)->length = length;
 	(*breakpoint_p)->type = type;
 	(*breakpoint_p)->is_set = false;
-	(*breakpoint_p)->orig_instr = malloc(length);
+	(*breakpoint_p)->orig_instr = malloc(length);  //分配length大小
 	(*breakpoint_p)->next = NULL;
-	(*breakpoint_p)->unique_id = bpwp_unique_id++;
+	(*breakpoint_p)->unique_id = bpwp_unique_id++; 
 
+	//调用底层接口添加断点
 	retval = target_add_breakpoint(target, *breakpoint_p);
 	switch (retval) {
 		case ERROR_OK:
@@ -79,9 +82,9 @@ static int breakpoint_add_internal(struct target *target,
 			reason = "unknown reason";
 fail:
 			LOG_ERROR("can't add breakpoint: %s", reason);
-			free((*breakpoint_p)->orig_instr);
-			free(*breakpoint_p);
-			*breakpoint_p = NULL;
+			free((*breakpoint_p)->orig_instr);  //释放内存
+			free(*breakpoint_p);  
+			*breakpoint_p = NULL;  //避免悬空指针
 			return retval;
 	}
 
@@ -201,19 +204,21 @@ static int hybrid_breakpoint_add_internal(struct target *target,
 	return ERROR_OK;
 }
 
+//添加断点
 int breakpoint_add(struct target *target,
 	target_addr_t address,
-	uint32_t length,
+	uint32_t length,  //断点覆盖的内存长度
 	enum breakpoint_type type)
 {
-	if (target->smp) {
+	if (target->smp) {  //多核：处理所有核
 		struct target_list *head;
 
-		if (type == BKPT_SOFT) {
+		if (type == BKPT_SOFT) {  //软件断点：只对第一个核添加断点
 			head = list_first_entry(target->smp_targets, struct target_list, lh);
 			return breakpoint_add_internal(head->target, address, length, type);
 		}
 
+		//多核迭代处理：对每个核添加断点
 		foreach_smp_target(head, target->smp_targets) {
 			struct target *curr = head->target;
 			int retval = breakpoint_add_internal(curr, address, length, type);
@@ -222,7 +227,7 @@ int breakpoint_add(struct target *target,
 		}
 
 		return ERROR_OK;
-	} else {
+	} else {  //单核
 		return breakpoint_add_internal(target, address, length, type);
 	}
 }
