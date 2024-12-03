@@ -1109,13 +1109,13 @@ static int cortex_m_resume(struct target *target, int current,
 		return ERROR_TARGET_NOT_HALTED;
 	}
 
-	if (!debug_execution) {
+	if (!debug_execution) { //是否启用调试模式执行，1表示调试，0表示正常恢复
 		target_free_all_working_areas(target);
 		cortex_m_enable_breakpoints(target);
 		cortex_m_enable_watchpoints(target);
 	}
 
-	if (debug_execution) {
+	if (debug_execution) {  
 		r = armv7m->arm.core_cache->reg_list + ARMV7M_PRIMASK;
 
 		/* Disable interrupts */
@@ -1146,7 +1146,7 @@ static int cortex_m_resume(struct target *target, int current,
 
 	/* current = 1: continue on current pc, otherwise continue at <address> */
 	r = armv7m->arm.pc;
-	if (!current) {
+	if (!current) { //标志是否从当前的PC恢复，1表示继续当前地址，0表示从指定地址处开始执行
 		buf_set_u32(r->value, 0, 32, address);
 		r->dirty = true;
 		r->valid = true;
@@ -1165,7 +1165,7 @@ static int cortex_m_resume(struct target *target, int current,
 	armv7m_restore_context(target);
 
 	/* the front-end may request us not to handle breakpoints */
-	if (handle_breakpoints) {
+	if (handle_breakpoints) { //是否需要在恢复执行时处理断点
 		/* Single step past breakpoint at current address */
 		breakpoint = breakpoint_find(target, resume_pc);
 		if (breakpoint) {
@@ -1218,7 +1218,7 @@ static int cortex_m_step(struct target *target, int current,
 	}
 
 	/* current = 1: continue on current pc, otherwise continue at <address> */
-	if (!current) {
+	if (!current) {  //选择起始地址，当current = 0，则从指定的address开始单步执行
 		buf_set_u32(pc->value, 0, 32, address);
 		pc->dirty = true;
 		pc->valid = true;
@@ -1227,10 +1227,10 @@ static int cortex_m_step(struct target *target, int current,
 	uint32_t pc_value = buf_get_u32(pc->value, 0, 32);
 
 	/* the front-end may request us not to handle breakpoints */
-	if (handle_breakpoints) {
+	if (handle_breakpoints) { //如果需要处理断点，查找当前PC值是否存在断点，如果存在，则移除断点
 		breakpoint = breakpoint_find(target, pc_value);
 		if (breakpoint)
-			cortex_m_unset_breakpoint(target, breakpoint);
+			cortex_m_unset_breakpoint(target, breakpoint);//移除断点
 	}
 
 	armv7m_maybe_skip_bkpt_inst(target, &bkpt_inst_found);
@@ -1244,7 +1244,7 @@ static int cortex_m_step(struct target *target, int current,
 	/* if no bkpt instruction is found at pc then we can perform
 	 * a normal step, otherwise we have to manually step over the bkpt
 	 * instruction - as such simulate a step */
-	if (bkpt_inst_found == false) {
+	if (bkpt_inst_found == false) {  //断点指令不存在
 		if (cortex_m->isrmasking_mode != CORTEX_M_ISRMASK_AUTO) {
 			/* Automatic ISR masking mode off: Just step over the next
 			 * instruction, with interrupts on or off as appropriate. */
@@ -1725,6 +1725,9 @@ int cortex_m_unset_breakpoint(struct target *target, struct breakpoint *breakpoi
 	return ERROR_OK;
 }
 
+/* Cortex-M 系列微控制器使用 Thumb-2 指令集，该指令集包括 16 位和 32 位指令。16 位指令占用 2 字节，
+ * 而 32 位指令占用 4 字节。调试器可能会请求在一个 32 位指令的中间位置设置断点，但实际硬件只支持 2 字节的断点。
+ */
 int cortex_m_add_breakpoint(struct target *target, struct breakpoint *breakpoint)
 {
 	if (breakpoint->length == 3) {
