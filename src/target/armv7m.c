@@ -655,6 +655,7 @@ int armv7m_start_algorithm(struct target *target,
 }
 
 /** Waits for an algorithm in the target. */
+//等待目标设备完成算法运行
 int armv7m_wait_algorithm(struct target *target,
 	int num_mem_params, struct mem_param *mem_params,
 	int num_reg_params, struct reg_param *reg_params,
@@ -667,12 +668,15 @@ int armv7m_wait_algorithm(struct target *target,
 
 	/* NOTE: armv7m_run_algorithm requires that each algorithm uses a software breakpoint
 	 * at the exit point */
-
+	//验证目标设备是有效的armv7m-m设备
 	if (armv7m_algorithm_info->common_magic != ARMV7M_COMMON_MAGIC) {
 		LOG_ERROR("current target isn't an ARMV7M target");
 		return ERROR_TARGET_INVALID;
 	}
 
+	/* 等待目标设备进入TARGET_HALTED状态
+	 * 如果目标设备未进入暂停状态，调用target_halt强制暂停目标设备，再次等待暂停
+	 */
 	retval = target_wait_state(target, TARGET_HALTED, timeout_ms);
 	/* If the target fails to halt due to the breakpoint, force a halt */
 	if (retval != ERROR_OK || target->state != TARGET_HALTED) {
@@ -684,7 +688,8 @@ int armv7m_wait_algorithm(struct target *target,
 			return retval;
 		return ERROR_TARGET_TIMEOUT;
 	}
-
+    /* 如果制定了目标设备的程序计数器PC值，检查PC是否指向期望的退点地址
+	 */
 	if (exit_point) {
 		/* PC value has been cached in cortex_m_debug_entry() */
 		uint32_t pc = buf_get_u32(armv7m->arm.pc->value, 0, 32);
@@ -696,6 +701,10 @@ int armv7m_wait_algorithm(struct target *target,
 	}
 
 	/* Read memory values to mem_params[] */
+	/* 内存参数读取：
+	 * 遍历mem_params数组，读取需要输出的数据
+	 * 对于direction 不是 PARAM_OUT的参数，调用target_read_buffer函数从目标设备读取内存数据
+	 */
 	for (int i = 0; i < num_mem_params; i++) {
 		if (mem_params[i].direction != PARAM_OUT) {
 			retval = target_read_buffer(target, mem_params[i].address,
@@ -707,6 +716,13 @@ int armv7m_wait_algorithm(struct target *target,
 	}
 
 	/* Copy core register values to reg_params[] */
+	/* 复制寄存器参数：
+	 * 遍历reg_params数组，获取指定寄存器的值
+	 *     使用register_get_by_name根据寄存器名称获取对应寄存器结构体
+	 *	   检查寄存器的大小是否与reg_params[i].size一致
+	 * 将寄存器的值存储到reg_params[i].value中
+	 * 	   使用buf_get_u32读取寄存器的值，使用buf_set_u32将值写入到reg_params[i].value
+	 */
 	for (int i = 0; i < num_reg_params; i++) {
 		if (reg_params[i].direction != PARAM_OUT) {
 			struct reg *reg = register_get_by_name(armv7m->arm.core_cache,
@@ -729,6 +745,15 @@ int armv7m_wait_algorithm(struct target *target,
 		}
 	}
 
+	/* 恢复寄存器的值
+	 * 遍历所有寄存器，将armv7m_algorithm_info->context[i]的值写入到当前寄存器中
+	 * 		倒序遍历寄存器缓存
+	 * 		检查寄存器是否存在
+	 *		读取当前寄存器的值
+	 * 		调试日志记录寄存器名及其值
+	 * 		将之前寄存器值写入当前寄存器中
+	 *      标记valid和dirty
+	 */
 	for (int i = armv7m->arm.core_cache->num_regs - 1; i >= 0; i--) {
 		struct reg *reg = &armv7m->arm.core_cache->reg_list[i];
 		if (!reg->exist)
@@ -747,6 +772,7 @@ int armv7m_wait_algorithm(struct target *target,
 	}
 
 	/* restore previous core mode */
+	//恢复核心模式
 	if (armv7m_algorithm_info->core_mode != armv7m->arm.core_mode) {
 		LOG_DEBUG("restoring core_mode: 0x%2.2x", armv7m_algorithm_info->core_mode);
 		buf_set_u32(armv7m->arm.core_cache->reg_list[ARMV7M_CONTROL].value,
