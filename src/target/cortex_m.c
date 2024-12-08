@@ -773,6 +773,7 @@ static int cortex_m_examine_exception_reason(struct target *target)
 	return retval;
 }
 
+//目标进入调试的操作
 static int cortex_m_debug_entry(struct target *target)
 {
 	uint32_t xpsr;
@@ -786,19 +787,24 @@ static int cortex_m_debug_entry(struct target *target)
 
 	/* Do this really early to minimize the window where the MASKINTS erratum
 	 * can pile up pending interrupts. */
+	 //设置中断屏蔽,确保调试状态不受中断干扰
 	cortex_m_set_maskints_for_halt(target);
 
+	//清理调试状态下的暂停信号
 	cortex_m_clear_halt(target);
 
+	//读取DHCSR寄存器
 	retval = cortex_m_read_dhcsr_atomic_sticky(target);
 	if (retval != ERROR_OK)
 		return retval;
-
+	
+	//检查调试原因
 	retval = armv7m->examine_debug_reason(target);
 	if (retval != ERROR_OK)
 		return retval;
 
 	/* examine PE security state */
+	//检查安全状态：对于ARMv8-M架构，还需要检查处理器是否处于安全状态(dscsr)。
 	bool secure_state = false;
 	if (armv7m->arm.arch == ARM_ARCH_V8M) {
 		uint32_t dscsr;
@@ -810,6 +816,7 @@ static int cortex_m_debug_entry(struct target *target)
 		secure_state = (dscsr & DSCSR_CDS) == DSCSR_CDS;
 	}
 
+	//加载所有寄存器：尝试快速读取所有寄存器到缓存中，如果失败，则切换为慢速读取模式。
 	/* Load all registers to arm.core_cache */
 	if (!cortex_m->slow_register_read) {
 		retval = cortex_m_fast_read_all_regs(target);
@@ -829,6 +836,7 @@ static int cortex_m_debug_entry(struct target *target)
 	xpsr = buf_get_u32(r->value, 0, 32);
 
 	/* Are we in an exception handler */
+	//更新核心模式和异常号：根据XPSR寄存器的值来判断当前是否处于异常处理程序中，并相应地更新核心模式和其他相关信息。
 	if (xpsr & 0x1FF) {
 		armv7m->exception_number = (xpsr & 0x1FF);
 
@@ -851,10 +859,11 @@ static int cortex_m_debug_entry(struct target *target)
 
 		armv7m->exception_number = 0;
 	}
-
+	//检查异常原因：如果有异常发生，分析异常的原因
 	if (armv7m->exception_number)
 		cortex_m_examine_exception_reason(target);
 
+	//记录调试状态：通过日志记录当前进入调试状态的核心模式、PC地址、安全状态以及目标状态
 	LOG_TARGET_DEBUG(target, "entered debug state in core mode: %s at PC 0x%" PRIx32
 			", cpu in %s state, target->state: %s",
 		arm_mode_name(arm->core_mode),
@@ -862,6 +871,7 @@ static int cortex_m_debug_entry(struct target *target)
 		secure_state ? "Secure" : "Non-Secure",
 		target_state_name(target));
 
+	//执行后置调试入口操作：如果定义了 post_debug_entry 回调函数，则调用它来执行额外的操作。
 	if (armv7m->post_debug_entry) {
 		retval = armv7m->post_debug_entry(target);
 		if (retval != ERROR_OK)
@@ -871,6 +881,7 @@ static int cortex_m_debug_entry(struct target *target)
 	return ERROR_OK;
 }
 
+//定期被调用来监控目标的状态变化，并作出响应
 static int cortex_m_poll(struct target *target)
 {
 	int detected_failure = ERROR_OK;
@@ -880,6 +891,7 @@ static int cortex_m_poll(struct target *target)
 	struct armv7m_common *armv7m = &cortex_m->armv7m;
 
 	/* Read from Debug Halting Control and Status Register */
+	//读取DHCSR
 	retval = cortex_m_read_dhcsr_atomic_sticky(target);
 	if (retval != ERROR_OK) {
 		target->state = TARGET_UNKNOWN;
@@ -889,6 +901,7 @@ static int cortex_m_poll(struct target *target)
 	/* Recover from lockup.  See ARMv7-M architecture spec,
 	 * section B1.5.15 "Unrecoverable exception cases".
 	 */
+	//恢复锁死状态：如果检测到锁死（Lockup），则尝试清除锁死状态，并设置调试原因为调试请求（DBG_REASON_DBGRQ）
 	if (cortex_m->dcb_dhcsr & S_LOCKUP) {
 		LOG_TARGET_ERROR(target, "clearing lockup after double fault");
 		cortex_m_write_debug_halt_mask(target, C_HALT, 0);
@@ -905,6 +918,7 @@ static int cortex_m_poll(struct target *target)
 			return retval;
 	}
 
+	//外部复位处理：检查是否有外部复位发生，如果有，将目标状态设置为复位状态
 	if (cortex_m->dcb_dhcsr_cumulated_sticky & S_RESET_ST) {
 		cortex_m->dcb_dhcsr_cumulated_sticky &= ~S_RESET_ST;
 		if (target->state != TARGET_RESET) {
@@ -914,6 +928,7 @@ static int cortex_m_poll(struct target *target)
 		return ERROR_OK;
 	}
 
+	//调用 cortex_m_endreset_event 来处理复位结束事件，更新状态为RUNNING
 	if (target->state == TARGET_RESET) {
 		/* Cannot switch context while running so endreset is
 		 * called with target->state == TARGET_RESET
@@ -929,6 +944,7 @@ static int cortex_m_poll(struct target *target)
 		prev_target_state = TARGET_RUNNING;
 	}
 
+	//暂停状态检测：如果目标处于运行或复位状态并进入了停止状态，则调用 cortex_m_debug_entry 来处理调试进入，并根据前一个状态调用相应的事件回调
 	if (cortex_m->dcb_dhcsr & S_HALT) {
 		target->state = TARGET_HALTED;
 
@@ -951,6 +967,7 @@ static int cortex_m_poll(struct target *target)
 		}
 	}
 
+	//未知状态处理：如果目标之前处于未知状态，现在看起来正在运行，则将其状态更新为运行状态
 	if (target->state == TARGET_UNKNOWN) {
 		/* Check if processor is retiring instructions or sleeping.
 		 * Unlike S_RESET_ST here we test if the target *is* running now,
@@ -965,6 +982,7 @@ static int cortex_m_poll(struct target *target)
 	}
 
 	/* Check that target is truly halted, since the target could be resumed externally */
+	//处理外部恢复：如果目标之前处于停止状态但现在不再停止，则认为发生了外部恢复，并调用相应的事件回调
 	if ((prev_target_state == TARGET_HALTED) && !(cortex_m->dcb_dhcsr & S_HALT)) {
 		/* registers are now invalid */
 		register_cache_invalidate(armv7m->arm.core_cache);

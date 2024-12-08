@@ -1929,6 +1929,8 @@ int target_call_event_callbacks(struct target *target, enum target_event event)
 	return ERROR_OK;
 }
 
+//调用所有注册的复位回调函数，处理目标设备复位时的操作
+//日志输出、遍历回调列表
 int target_call_reset_callbacks(struct target *target, enum target_reset_mode reset_mode)
 {
 	struct target_reset_callback *callback;

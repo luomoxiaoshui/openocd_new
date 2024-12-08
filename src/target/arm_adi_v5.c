@@ -749,6 +749,7 @@ int dap_dp_init(struct adiv5_dap *dap)
  *
  * @param dap The DAP being initialized.
  */
+ //初始化DAP/重新连接DAP
 int dap_dp_init_or_reconnect(struct adiv5_dap *dap)
 {
 	LOG_DEBUG("%s", adiv5_dap_name(dap));
@@ -760,11 +761,17 @@ int dap_dp_init_or_reconnect(struct adiv5_dap *dap)
 	 * initialization system and debug power would be disabled while clearing
 	 * the sticky error bit.
 	 */
+	 /* 初始化控制状态：设置DAP的dp_ctrl_stat寄存器
+	  * CDBGPWRUPREQ：请求调试端口上电
+	  * CSYSPWRUPREQ：请求系统上电
+	  */
 	dap->dp_ctrl_stat = CDBGPWRUPREQ | CSYSPWRUPREQ;
 
 	dap->do_reconnect = false;
 
+	//读取控制状态：DP_CTRL_STAT寄存器
 	dap_dp_read_atomic(dap, DP_CTRL_STAT, NULL);
+	//根据是否需要进行重连进行处理
 	if (dap->do_reconnect) {
 		/* dap connect calls dap_dp_init() after transport dependent initialization */
 		return dap->ops->connect(dap);

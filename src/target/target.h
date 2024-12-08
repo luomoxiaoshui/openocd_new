@@ -62,6 +62,7 @@ enum nvp_assert {
 	NVP_ASSERT,
 };
 
+//复位模式
 enum target_reset_mode {
 	RESET_UNKNOWN = 0,
 	RESET_RUN = 1,		/* reset and let target run */

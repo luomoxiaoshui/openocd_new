@@ -165,6 +165,7 @@ static const struct {
  * Restores target context using the cache of core registers set up
  * by armv7m_build_reg_cache(), calling optional core-specific hooks.
  */
+ //通过寄存器缓存恢复目标设备之前的信息
 int armv7m_restore_context(struct target *target)
 {
 	int i;
@@ -179,10 +180,11 @@ int armv7m_restore_context(struct target *target)
 	/* The descending order of register writes is crucial for correct
 	 * packing of ARMV7M_PMSK_BPRI_FLTMSK_CTRL!
 	 * See also comments in the register table above */
+	 //遍历寄存器缓存中的寄存器列表，按照递减的顺序逐个恢复
 	for (i = cache->num_regs - 1; i >= 0; i--) {
 		struct reg *r = &cache->reg_list[i];
 
-		if (r->exist && r->dirty)
+		if (r->exist && r->dirty) //检查寄存器存在且标记为dirty，将寄存器的值写回目标设备
 			armv7m->arm.write_core_reg(target, r, i, ARM_MODE_ANY, r->value);
 	}
 
@@ -502,6 +504,15 @@ int armv7m_run_algorithm(struct target *target,
 }
 
 /** Starts a Thumb algorithm in the target. */
+/* 用于在目标设备中启动Thumb算法
+ * num_mem_params：内存参数数量
+ * mem_param *mem_params：内存参数结构数组
+ * num_reg_params：寄存器参数数量
+ * reg_param *reg_params：寄存器参数结构数组，用于设置寄存器值
+ * target_addr_t entry_point：算法的入口地址
+ * target_addr_t exit_point：算法的退出地址
+ * arch_info：算法架构的信息
+ */
 int armv7m_start_algorithm(struct target *target,
 	int num_mem_params, struct mem_param *mem_params,
 	int num_reg_params, struct reg_param *reg_params,
@@ -516,17 +527,23 @@ int armv7m_start_algorithm(struct target *target,
 	/* NOTE: armv7m_run_algorithm requires that each algorithm uses a software breakpoint
 	 * at the exit point */
 
+	//确保目标设备类型正确
 	if (armv7m_algorithm_info->common_magic != ARMV7M_COMMON_MAGIC) {
 		LOG_ERROR("current target isn't an ARMV7M target");
 		return ERROR_TARGET_INVALID;
 	}
-
+	
+	//确保核暂停
 	if (target->state != TARGET_HALTED) {
 		LOG_WARNING("target not halted");
 		return ERROR_TARGET_NOT_HALTED;
 	}
 
 	/* Store all non-debug execution registers to armv7m_algorithm_info context */
+	/* 寄存器上下文保存
+	 * 遍历寄存器缓存列表，将所有非调试寄存器的值保存到算法上下文中
+	 * 检查寄存器是否有效，如果无效，则尝试读取寄存器值
+	 */
 	for (unsigned i = 0; i < armv7m->arm.core_cache->num_regs; i++) {
 		struct reg *reg = &armv7m->arm.core_cache->reg_list[i];
 		if (!reg->exist)
@@ -541,6 +558,10 @@ int armv7m_start_algorithm(struct target *target,
 		armv7m_algorithm_info->context[i] = buf_get_u32(reg->value, 0, 32);
 	}
 
+	/* 处理内存参数
+	 * 遍历mem_params，检查每个内存参数的方向是否是输入
+	 * 对于输入方向的参数，将其值写入目标设备指定地址
+	 */
 	for (int i = 0; i < num_mem_params; i++) {
 		if (mem_params[i].direction == PARAM_IN)
 			continue;
@@ -551,6 +572,12 @@ int armv7m_start_algorithm(struct target *target,
 			return retval;
 	}
 
+	/* 处理寄存器参数
+	 * 遍历reg_params，检查每个内存参数的方向是否是输入
+	 * 通过register_get_by_name获取目标寄存器的描述结构体
+	 * 验证寄存器的大小是否与参数的大小匹配
+	 * 提取寄存器的值，将其写入目标设备的寄存器
+	 */
 	for (int i = 0; i < num_reg_params; i++) {
 		if (reg_params[i].direction == PARAM_IN)
 			continue;
@@ -574,6 +601,10 @@ int armv7m_start_algorithm(struct target *target,
 		armv7m_set_core_reg(reg, reg_params[i].value);
 	}
 
+	/* 配置xPSR：xPSR中的T位是用于指示当前使用的指令集，当T位为1时，表示处理器正在使用Thumb指令集
+	 * 在ARMv7-M架构中，处理器默认只支持Thumb指令集
+	 * valid表示寄存器值有效，dirty表示寄存器的值已被修改，需要同步回硬件
+	 */
 	{
 		/*
 		 * Ensure xPSR.T is set to avoid trying to run things in arm
@@ -591,6 +622,12 @@ int armv7m_start_algorithm(struct target *target,
 		reg->dirty = true;
 	}
 
+	/* 设置内核模式
+	 * ARM_MODE_ANY通常表示对核心模式没有特定要求，可以接受任何模式；而core_mode则是当前处理器的实际核心模式
+	 * ARM_MODE_HANDLER是中断处理模式，ARM_MODE_THREAD是线程模式
+	 * 将armv7m_algorithm_info->core_mode的值设置到CONTROL寄存器中
+	 * 这里0, 1参数指定了要设置的位范围（第0位到第1位），这对应于CONTROL寄存器中的特权级别和堆栈指针选择位
+	 */
 	if (armv7m_algorithm_info->core_mode != ARM_MODE_ANY &&
 			armv7m_algorithm_info->core_mode != core_mode) {
 
@@ -608,8 +645,10 @@ int armv7m_start_algorithm(struct target *target,
 	}
 
 	/* save previous core mode */
+	//保存当前的内核模式，以便后续恢复
 	armv7m_algorithm_info->core_mode = core_mode;
 
+	//启动算法执行
 	retval = target_resume(target, 0, entry_point, 1, 1);
 
 	return retval;
