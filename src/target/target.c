@@ -1904,6 +1904,7 @@ int target_unregister_timer_callback(int (*callback)(void *priv), void *priv)
 	return ERROR_FAIL;
 }
 
+//负责处理目标设备触发的事件，执行与事件相关的回调函数
 int target_call_event_callbacks(struct target *target, enum target_event event)
 {
 	struct target_event_callback *callback = target_event_callbacks;
@@ -2037,13 +2038,19 @@ int64_t target_timer_next_event(void)
 }
 
 /* Prints the working area layout for debug purposes */
+/* 显示当前工作区的地址、大小、状态
+ * 通过c = c->next遍历工作区链表
+ * c->backup ? 'b' : ' '表示工作区有备份打印字符'b'，否则打印空格
+ * c->free ? ' ' : '*'表示工作区空闲打印空格，否则打印字符'*'
+ * TARGET_ADDR_FMT是地址格式化宏，用于打印工作区的起始地址c->address和结束地址c->address + c->size - 1
+ */
 static void print_wa_layout(struct target *target)
 {
 	struct working_area *c = target->working_areas;
 
 	while (c) {
 		LOG_DEBUG("%c%c " TARGET_ADDR_FMT "-" TARGET_ADDR_FMT " (%" PRIu32 " bytes)",
-			c->backup ? 'b' : ' ', c->free ? ' ' : '*',
+			c->backup ? 'b' : ' ', c->free ? ' ' : '*', //
 			c->address, c->address + c->size - 1, c->size);
 		c = c->next;
 	}
@@ -2228,8 +2235,10 @@ static int target_restore_working_area(struct target *target, struct working_are
 }
 
 /* Restore the area's backup memory, if any, and return the area to the allocation pool */
+//释放分配的工作区并在需要时恢复其备份数据
 static int target_free_working_area_restore(struct target *target, struct working_area *area, int restore)
-{
+{	
+	//检查工作区指针是否为空，或是否已经释放：避免重复释放或者访问无效工作区
 	if (!area || area->free)
 		return ERROR_OK;
 
@@ -2239,7 +2248,7 @@ static int target_free_working_area_restore(struct target *target, struct workin
 		/* REVISIT: Perhaps the area should be freed even if restoring fails. */
 		if (retval != ERROR_OK)
 			return retval;
-	}
+	}//如果需要恢复，调用target_restore_working_area恢复该工作区的备份数据：支持在释放前保留重要数据
 
 	area->free = true;
 
@@ -2250,9 +2259,11 @@ static int target_free_working_area_restore(struct target *target, struct workin
 	/* TODO: Is this really safe? It points to some previous caller's memory.
 	 * How could we know that the area pointer is still in that place and not
 	 * some other vital data? What's the purpose of this, anyway? */
+	//清理用户指针：避免产生悬空指针
 	*area->user = NULL;
 	area->user = NULL;
 
+	//合并工作区并更新布局：合并目标设备中所有连续的空闲区域，优化内存使用
 	target_merge_working_areas(target);
 
 	print_wa_layout(target);

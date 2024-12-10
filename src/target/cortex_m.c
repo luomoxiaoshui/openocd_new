@@ -1263,10 +1263,15 @@ static int cortex_m_step(struct target *target, int current,
 	 * a normal step, otherwise we have to manually step over the bkpt
 	 * instruction - as such simulate a step */
 	if (bkpt_inst_found == false) {  //断点指令不存在
+		/* 检查当前的中断屏蔽模式（isrmasking_mode），并在非自动模式下准备进行单步执行
+		 * 当自动中断屏蔽模式关闭时，只需单步执行下一条指令，并根据需要启用或禁用中断
+		 */
 		if (cortex_m->isrmasking_mode != CORTEX_M_ISRMASK_AUTO) {
 			/* Automatic ISR masking mode off: Just step over the next
 			 * instruction, with interrupts on or off as appropriate. */
+			//用于设置适当的中断屏蔽状态，以便正确执行单步操作
 			cortex_m_set_maskints_for_step(target);
+			//用于向目标设备写入调试控制寄存器中的停止（C_HALT）和单步（C_STEP）标志
 			cortex_m_write_debug_halt_mask(target, C_STEP, C_HALT);
 		} else {
 			/* Process interrupts during stepping in a way they don't interfere
@@ -1303,6 +1308,17 @@ static int cortex_m_step(struct target *target, int current,
 			 * to gdb.
 			 *
 			 */
+			 /* 自动中断屏蔽模式下处理中断：在单步执行期间允许中断发生，但确保这些中断不会干扰调试过程。
+			  * 具体做法是：
+			  * 	在当前程序计数器（PC）处设置一个临时断点，并让核心运行以处理待处理的中断。
+			  * 	当所有中断处理完毕后，再次触发断点，然后禁用中断并单步执行下一条指令
+			  *
+			  * 检查当前PC是否位于高半字地址（pc_value & 0x02），
+			  * 并且在低半字地址上已经存在一个断点（breakpoint_find(target, pc_value & ~0x03)）。
+			  * 如果满足这两个条件，则直接禁用中断并单步执行下一条指令
+			  * 某些Cortex-M处理器（如STM32F1和STM32F2）在高半字地址上设置断点时，可能会导致在重启核心后无法再次触发断点
+			  * 因此，为了避免这种情况，直接禁用中断并单步执行
+			  */
 			if ((pc_value & 0x02) && breakpoint_find(target, pc_value & ~0x03)) {
 				LOG_TARGET_DEBUG(target, "Stepping over next instruction with interrupts disabled");
 				cortex_m_write_debug_halt_mask(target, C_HALT | C_MASKINTS, 0);
@@ -1313,6 +1329,9 @@ static int cortex_m_step(struct target *target, int current,
 			} else {
 
 				/* Set a temporary break point */
+				/* 设置临时断点：如果已经有现成的断点对象（breakpoint），则使用该对象设置断点。
+                 * 否则，根据当前PC值和浮点单元FPB版本选择合适的断点类型(硬件断点或软件断点)，并添加临时断点
+				 */
 				if (breakpoint) {
 					retval = cortex_m_set_breakpoint(target, breakpoint);
 				} else {
@@ -1327,6 +1346,9 @@ static int cortex_m_step(struct target *target, int current,
 				bool tmp_bp_set = (retval == ERROR_OK);
 
 				/* No more breakpoints left, just do a step */
+				/* 处理无可用断点的情况：
+				 * 如果无法设置临时断点(如，所有断点槽已满)，则直接禁用中断并单步执行下一条指令
+				 */
 				if (!tmp_bp_set) {
 					cortex_m_set_maskints_for_step(target);
 					cortex_m_write_debug_halt_mask(target, C_STEP, C_HALT);
@@ -1335,6 +1357,11 @@ static int cortex_m_step(struct target *target, int current,
 					cortex_m_set_maskints_for_halt(target);
 				} else {
 					/* Start the core */
+					/* 启动核心并等待中断处理：
+					 * 		启动核心并启用中断，让其处理待处理的中断。
+					 *		使用do-while循环等待直到核心再次停止(通过断点触发)或超时(500毫秒)。
+				     *		如果超时，记录日志并保持核心运行；否则，移除临时断点并禁用中断，单步执行下一条指令
+					 */
 					LOG_TARGET_DEBUG(target, "Starting core to serve pending interrupts");
 					int64_t t_start = timeval_ms();
 					cortex_m_set_maskints_for_run(target);
@@ -1377,16 +1404,27 @@ static int cortex_m_step(struct target *target, int current,
 		}
 	}
 
+	//读取调试控制寄存器（DHCSR）
 	retval = cortex_m_read_dhcsr_atomic_sticky(target);
 	if (retval != ERROR_OK)
 		return retval;
 
 	/* registers are now invalid */
+	/* 使寄存器失效：
+	 * 单步执行或中断处理可能会改变寄存器的值，使得缓存中的数据不再有效
+	 * 通过使缓存失效，确保后续读取寄存器时会从硬件中重新获取最新的值
+	 */
 	register_cache_invalidate(armv7m->arm.core_cache);
 
+	//设置断点：如果之前设置了临时断点(breakpoint不为NULL)，则再次设置该断点，
+	//确保在下一步操作中仍然可以使用这个断点
 	if (breakpoint)
 		cortex_m_set_breakpoint(target, breakpoint);
-
+	
+	/* 处理超时情况:
+	 * 如果中断处理超时(isr_timed_out为真)，则将目标设备的状态设置为运行状态（TARGET_RUNNING），
+	 * 并且调试原因设置为“未停止”（DBG_REASON_NOTHALTED）。这意味着用户需要手动停止核心的执行
+	 */
 	if (isr_timed_out) {
 		/* Leave the core running. The user has to stop execution manually. */
 		target->debug_reason = DBG_REASON_NOTHALTED;
@@ -1394,15 +1432,29 @@ static int cortex_m_step(struct target *target, int current,
 		return ERROR_OK;
 	}
 
+	/* 记录调试信息:
+	 * 记录当前调试控制和状态寄存器（DCB_DHCSR）以及嵌套向量中断控制器的状态寄存器（NVIC_ICSR）的值
+	 */
 	LOG_TARGET_DEBUG(target, "target stepped dcb_dhcsr = 0x%" PRIx32
 		" nvic_icsr = 0x%" PRIx32,
 		cortex_m->dcb_dhcsr, cortex_m->nvic_icsr);
 
+	/* 进入调试模式:
+	 * 确保核心停止执行，并允许调试工具获取当前的程序状态
+	 */
 	retval = cortex_m_debug_entry(target);
 	if (retval != ERROR_OK)
 		return retval;
+	/* 触发事件回调:
+	 * 调用所有注册了TARGET_EVENT_HALTED事件的回调函数
+	 * 这些回调函数可以在核心停止执行后执行自定义操作，例如更新UI、记录日志等
+	 */
 	target_call_event_callbacks(target, TARGET_EVENT_HALTED);
 
+	/* 再次记录调试信息:
+	 * 再次记录调试控制和状态寄存器（DCB_DHCSR）以及嵌套向量中断控制器的状态寄存器（NVIC_ICSR）的值
+	 * 这有助于确认核心确实已经停止，并且状态寄存器的值是否发生了变化
+	 */
 	LOG_TARGET_DEBUG(target, "target stepped dcb_dhcsr = 0x%" PRIx32
 		" nvic_icsr = 0x%" PRIx32,
 		cortex_m->dcb_dhcsr, cortex_m->nvic_icsr);

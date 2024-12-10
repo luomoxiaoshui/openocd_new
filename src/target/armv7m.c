@@ -1124,6 +1124,7 @@ cleanup1:
 	return retval;
 }
 
+//用于检测并跳过BKPT指令，确保内核能够正确继续执行
 int armv7m_maybe_skip_bkpt_inst(struct target *target, bool *inst_found)
 {
 	struct armv7m_common *armv7m = target_to_armv7m(target);
@@ -1135,6 +1136,12 @@ int armv7m_maybe_skip_bkpt_inst(struct target *target, bool *inst_found)
 	 * then we have to manually step over it, otherwise
 	 * the core will break again */
 
+	/* 如果调试流程停在断点DBG_REASON_BREAKPOINT上，进入检查流程
+	 *  	读取当前程序计数器的PC值，并屏蔽Thumb模式的最低有效位
+	 * 		使用target_read_u16，读取目标设备当前地址处的指令操作码op
+	 *		判断是否为BKPT指令：BKPT指令在Thumb模式下的编码是0xBE00
+	 *      跳过断点指令:将PC增加两字节，跳过该指令；更新PC值，并标记dirty和valid
+	 */
 	if (target->debug_reason == DBG_REASON_BREAKPOINT) {
 		uint16_t op;
 		uint32_t pc = buf_get_u32(r->value, 0, 32);
@@ -1152,6 +1159,7 @@ int armv7m_maybe_skip_bkpt_inst(struct target *target, bool *inst_found)
 		}
 	}
 
+	//更新输出参数
 	if (inst_found)
 		*inst_found = result;
 
