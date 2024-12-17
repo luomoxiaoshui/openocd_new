@@ -760,15 +760,15 @@ static int target_soft_reset_halt(struct target *target)
  * soft breakpoints embedded in the algorithm automatically terminate the
  * algorithm.
  *
- * @param target used to run the algorithm
- * @param num_mem_params
- * @param mem_params
- * @param num_reg_params
- * @param reg_param
- * @param entry_point
- * @param exit_point
- * @param timeout_ms
- * @param arch_info target-specific description of the algorithm.
+ * @param target used to run the algorithm  目标设备
+ * @param num_mem_params   内存参数数量
+ * @param mem_params  对应的内存参数结构体数组
+ * @param num_reg_params  寄存器参数的数量
+ * @param reg_param  对应的寄存器参数结构体数组
+ * @param entry_point  算法的入口地址，目标设备执行的起始地址
+ * @param exit_point  算法的退出地址，算法执行完成后返回的地址
+ * @param timeout_ms  算法的最大运行时间，超时报错
+ * @param arch_info target-specific description of the algorithm.芯片架构特定的信息指针
  */
 int target_run_algorithm(struct target *target,
 		int num_mem_params, struct mem_param *mem_params,
@@ -1963,6 +1963,7 @@ static void target_merge_working_areas(struct target *target)
 	}
 }
 
+//分配工作区内存
 int target_alloc_working_area_try(struct target *target, uint32_t size, struct working_area **area)
 {
 	/* Reevaluate working area address based on MMU state*/
@@ -1970,6 +1971,9 @@ int target_alloc_working_area_try(struct target *target, uint32_t size, struct w
 		int retval;
 		int enabled;
 
+		/* 检查目标设备是否支持内存管理单元MMU，
+		 * 如果启用了MMU，优先选择虚拟地址工作区，否则选择物理地址工作区
+		 */
 		retval = target->type->mmu(target, &enabled);
 		if (retval != ERROR_OK)
 			return retval;
@@ -1999,6 +2003,7 @@ int target_alloc_working_area_try(struct target *target, uint32_t size, struct w
 		}
 
 		/* Set up initial working area on first call */
+		//初始化工作区：创建新的工作区，并设置相关参数：4字节对齐
 		struct working_area *new_wa = malloc(sizeof(*new_wa));
 		if (new_wa) {
 			new_wa->next = NULL;
@@ -2015,6 +2020,11 @@ int target_alloc_working_area_try(struct target *target, uint32_t size, struct w
 	/* only allocate multiples of 4 byte */
 	size = ALIGN_UP(size, 4);
 
+	/* 分配内存块：
+	 * 		遍历工作区链表，寻找满足条件的空闲内存块
+	 *		如果找到满足的内存块，则调用target_split_working_area进行分割
+	 *		没有找到则返回内存资源不可用
+	 */
 	struct working_area *c = target->working_areas;
 
 	/* Find the first large enough working area */
@@ -2033,6 +2043,10 @@ int target_alloc_working_area_try(struct target *target, uint32_t size, struct w
 	LOG_DEBUG("allocated new working area of %" PRIu32 " bytes at address " TARGET_ADDR_FMT,
 			  size, c->address);
 
+	/* 处理备份工作区：
+	 * 		如果目标设备支持备份工作区，会为当前分配的内存块创建一个备份区域
+	 *		使用target_read_memory读取原始内容并存储到备份区域
+	 */
 	if (target->backup_working_area) {
 		if (!c->backup) {
 			c->backup = malloc(c->size);
