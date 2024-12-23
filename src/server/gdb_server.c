@@ -360,6 +360,19 @@ static int gdb_write(struct connection *connection, void *data, int len)
 	return ERROR_SERVER_REMOTE_CLOSED;
 }
 
+/* 用于记录来自GDB的传入数据包。它根据日志级别和数据包的内容决定如何记录这些信息
+ *     日志级别检查:用来检查当前的日志级别是否为调试级别,如果不是直接返回，不执行后续的日志记录操作
+ *	   获取目标对象：调用get_target_from_connection函数，从连接中获取对应的目标对象target，通常是指正在调试的目标设备或进程
+ *	   避免打印非可打印字符：
+ *	       计算数据包的长度 packet_len
+ *		   调用 find_nonprint_char 函数查找数据包中的第一个非可打印字符的位置，并将其存储在 nonprint 中
+ *     处理包含非可打印字符的数据包：
+ *			查找冒号 (:)：使用 memchr 在数据包的前50个字符中查找冒号。某些GDB协议的数据包可能以冒号分隔命令和数据
+ *			判断是否有可打印的前缀：如果找到了冒号且非可打印字符出现在冒号之后，则认为数据包有可打印的前缀
+ *			记录日志：如果数据包有可打印的前缀，则记录前缀部分并指出剩余部分为二进制数据，同时给出二进制数据的长度。
+ *				如果整个数据包都是不可打印字符，则简单地记录数据包的总长度，并说明它是二进制数据
+ *		处理全为可打印字符的数据包：如果数据包中所有字符都是可打印的，则直接记录整个数据包的内容
+ */
 static void gdb_log_incoming_packet(struct connection *connection, char *packet)
 {
 	if (!LOG_LEVEL_IS(LOG_LVL_DEBUG))
@@ -406,7 +419,42 @@ static void gdb_log_outgoing_packet(struct connection *connection, char *packet_
 		LOG_TARGET_DEBUG(target, "sending packet: $%.*s#%2.2x", packet_len, packet_buf,
 			checksum);
 }
-
+/* gdb_put_packet_inner:用于向GDB发送数据包，并处理与GDB之间的通信细节
+ *		char *buffer：指向要发送的数据包内容的字符串
+ * 流程：
+ *		校验和计算：初始化my_checksum为0，遍历 buffer 中的每个字符，并将其累加到 my_checksum 中
+ *  	检查未处理的输入数据:
+ *			无限循环：通过 for (;;) 创建一个无限循环，直到满足特定条件才退出
+ *			检查待处理数据：调用 check_pending 函数检查连接中是否有未处理的数据。check_pending 返回 ERROR_OK 表示没有错误，gotdata 为真表示有未处理的数据
+ *			读取字符：如果有未处理的数据，则调用 gdb_get_char 读取一个字符并存储在 reply 中
+ *			处理 $ 字符：如果读取到的字符是 $，这可能是一个新数据包的开始
+ *			丢弃其他字符：如果读取到的字符不是 $，则记录一条警告信息，说明丢弃了一个意外的字符，并继续循环
+ *		处理要发送的数据包：
+ *			无限循环：创建一个无限循环，直到满足特定条件才退出	
+ *			记录传出的数据包：gdb_log_outgoing_packet
+ *			数据包格式化与发送：
+ *				初始化 local_buffer：创建一个大小为1024字节的缓冲区 local_buffer，并将第一个字符设置为 $，这是GDB协议中数据包的开始标志。
+ *				小数据包优化：如果数据包长度加上校验和部分（# 和两位十六进制校验和）不超过 local_buffer 的大小，则将整个数据包（包括校验和）复制到 local_buffer 中，并通过一次 gdb_write 调用发送出去。
+ *				大数据包处理：如果数据包过大，不能一次性放入 local_buffer，则分三次调用 gdb_write：
+ *					发送 $ 符号、发送数据包内容、发送校验和部分（# 和两位十六进制校验和）
+ *			处理ACK/NACK和其他响应：
+ *				检查 noack_mode：如果GDB连接处于无ACK模式（noack_mode），则直接退出循环，因为不需要等待确认
+ *				读取响应字符：调用 gdb_get_char 从连接中读取一个字符并存储在 reply 中	
+ *			处理不同的响应字符
+ *				正确认可 (+)：如果收到 +，表示GDB正确接收了数据包，记录日志并退出循环
+ *				负确认 (-)：如果收到 -，表示GDB没有正确接收数据包，设置 output_flag 为 GDB_OUTPUT_NO 以停止发送输出包，并记录日志，发出警告信息
+ *				中断请求 (0x3)：
+ *					如果收到 Ctrl-C（ASCII码0x3），设置 ctrl_c 标志为 true，记录日志，并继续读取下一个字符。
+ *					根据后续字符的不同，分别处理：
+ *						+：记录日志并退出循环。
+ *						-：设置 output_flag 为 GDB_OUTPUT_NO，记录日志，发出警告信息。
+ *						$：记录错误日志，假设数据包已正确接收，并将 $ 字符重新放回输入队列。
+ *						其他字符：记录错误日志，关闭连接并返回错误码 ERROR_SERVER_REMOTE_CLOSED
+ *				未接收到ACK ($)：如果收到 $，记录错误日志，假设数据包已正确接收，并将 $ 字符重新放回输入队列
+ *				未知字符：如果收到其他未知字符，记录错误日志，关闭连接并返回错误码 ERROR_SERVER_REMOTE_CLOSED
+ *		检查连接状态:检查 gdb_con->closed 标志，如果连接已关闭，则返回错误码 ERROR_SERVER_REMOTE_CLOSED
+ *
+ */
 static int gdb_put_packet_inner(struct connection *connection,
 		char *buffer, int len)
 {
@@ -419,6 +467,7 @@ static int gdb_put_packet_inner(struct connection *connection,
 	for (i = 0; i < len; i++)
 		my_checksum += buffer[i];
 
+//这个预处理器指令使得下面的代码块只在定义了 _DEBUG_GDB_IO_ 宏时编译。这意味着这些调试代码不会出现在非调试版本的程序中
 #ifdef _DEBUG_GDB_IO_
 	/*
 	 * At this point we should have nothing in the input queue from GDB,
@@ -2709,6 +2758,7 @@ static int gdb_generate_thread_list(struct target *target, char **thread_list_ou
 	return retval;
 }
 
+//用于从目标设备的线程列表中提取指定范围的线程信息，并将其转换为 XML 格式返回给 GDB 客户端。且负责处理分块传输的逻辑，确保数据可以逐步发送
 static int gdb_get_thread_list_chunk(struct target *target, char **thread_list,
 		char **chunk, int32_t offset, uint32_t length)
 {
@@ -2752,6 +2802,7 @@ static int gdb_get_thread_list_chunk(struct target *target, char **thread_list,
 	return ERROR_OK;
 }
 
+//用于处理来自GDB客户端的查询（query）命令。它根据不同的查询命令执行相应的操作，并返回适当的响应给GDB客户端
 static int gdb_query_packet(struct connection *connection,
 		char const *packet, int packet_size)
 {
@@ -2759,6 +2810,10 @@ static int gdb_query_packet(struct connection *connection,
 	struct gdb_connection *gdb_connection = connection->priv;
 	struct target *target = get_target_from_connection(connection);
 
+	/* 解码命令：将 qRcmd, 后面的十六进制编码的字符串解码为普通字符串。
+     * 执行命令：使用 Jim_EvalObj 执行解码后的命令，并捕获输出。
+     * 处理结果：根据命令执行的结果，发送相应的响应给GDB客户端。如果命令成功执行且有输出，则将输出转换为十六进制格式并发送；否则发送 OK 或错误信息
+	 */
 	if (strncmp(packet, "qRcmd,", 6) == 0) {
 		if (packet_size > 6) {
 			Jim_Interp *interp = cmd_ctx->interp;
@@ -2834,6 +2889,10 @@ static int gdb_query_packet(struct connection *connection,
 		gdb_put_packet(connection, "OK", 2);
 		return ERROR_OK;
 	} else if (strncmp(packet, "qCRC:", 5) == 0) {
+	/* 解析地址和长度：从命令中提取内存地址和长度。
+     * 计算校验和：调用 target_checksum_memory 计算指定内存区域的校验和。
+     * 发送响应：如果计算成功，发送包含校验和的响应；否则发送错误信息
+	 */
 		if (packet_size > 5) {
 			int retval;
 			char gdb_reply[10];
@@ -2868,6 +2927,9 @@ static int gdb_query_packet(struct connection *connection,
 			return ERROR_OK;
 		}
 	} else if (strncmp(packet, "qSupported", 10) == 0) {
+	/* 检测支持的功能：检查目标设备是否支持目标描述、内存映射等功能
+     * 构建响应：根据检测结果构建支持的功能列表，并发送给GDB客户端
+	 */
 		/* we currently support packet size and qXfer:memory-map:read (if enabled)
 		 * qXfer:features:read is supported for some targets */
 		int retval = ERROR_OK;
@@ -2908,10 +2970,14 @@ static int gdb_query_packet(struct connection *connection,
 		free(buffer);
 
 		return ERROR_OK;
+	/* 读取内存映射：如果存在flash bank，则调用 gdb_memory_map 函数读取内存映射信息
+	 */
 	} else if ((strncmp(packet, "qXfer:memory-map:read::", 23) == 0)
 		   && (flash_get_bank_count() > 0))
 		return gdb_memory_map(connection, packet, packet_size);
 	else if (strncmp(packet, "qXfer:features:read:", 20) == 0) {
+	/* 读取目标描述：解析命令中的偏移量和长度，调用 gdb_get_target_description_chunk 获取目标描述的一部分，并发送给GDB客户端
+	 */
 		char *xml = NULL;
 		int retval = ERROR_OK;
 
@@ -2943,6 +3009,18 @@ static int gdb_query_packet(struct connection *connection,
 		free(xml);
 		return ERROR_OK;
 	} else if (strncmp(packet, "qXfer:threads:read:", 19) == 0) {
+		/* 读取线程列表：解析命令中的偏移量和长度，调用 gdb_get_thread_list_chunk 获取线程列表的一部分，并发送给GDB客户端
+		 * xml：用于存储生成的 XML 格式的线程列表
+		 * 实现流程：
+		 * 		跳过命令前缀：将 packet 指针向前移动 19 个字符，跳过命令前缀，以便后续处理偏移量和长度参数
+		 *		解析偏移量和长度：调用 decode_xfer_read 函数解析命令中的偏移量（offset）和长度（length）
+		 *		获取线程列表分块：调用 gdb_get_thread_list_chunk 函数获取线程列表的一部分。
+		 *				该函数会根据指定的 offset 和 length 从 target 的线程列表中提取相应的数据，并将其转换为 XML 格式，存储在 xml 中
+		 *				gdb_connection->thread_list 是一个缓存，用于存储整个线程列表
+		 *		处理错误：如果 gdb_get_thread_list_chunk 返回错误码，则调用 gdb_error 发送错误信息给 GDB 客户端，并返回错误码
+		 *		发送响应：如果 gdb_get_thread_list_chunk 成功执行，则使用 gdb_put_packet 函数将生成的 XML 数据发送给 GDB 客户端
+		 *		释放资源：	释放分配给 xml 的内存，避免内存泄漏	
+		 */
 		char *xml = NULL;
 		int retval = ERROR_OK;
 
@@ -2974,30 +3052,48 @@ static int gdb_query_packet(struct connection *connection,
 		free(xml);
 		return ERROR_OK;
 	} else if (strncmp(packet, "QStartNoAckMode", 15) == 0) {
+	/* 启用无ACK模式：设置 noack_mode 标志为 1，并发送 OK 响应
+	 */
 		gdb_connection->noack_mode = 1;
 		gdb_put_packet(connection, "OK", 2);
 		return ERROR_OK;
 	} else if (target->type->gdb_query_custom) {
+	/* 处理自定义查询命令：如果目标设备支持自定义查询命令，则调用相应的处理函数
+	 */
 		char *buffer = NULL;
 		int ret = target->type->gdb_query_custom(target, packet, &buffer);
 		gdb_put_packet(connection, buffer, strlen(buffer));
 		return ret;
 	}
 
+	//如果没有匹配的查询命令，默认发送空响应
 	gdb_put_packet(connection, "", 0);
 	return ERROR_OK;
 }
 
+//处理GDB发送的vCont命令，用于控制目标设备的执行流程，允许GDB请求目标设备继续执行、单步执行、暂停等操作
 static bool gdb_handle_vcont_packet(struct connection *connection, const char *packet, int packet_size)
-{
+{	
+	//获取GDB连接和目标设备
 	struct gdb_connection *gdb_connection = connection->priv;
 	struct target *target = get_target_from_connection(connection);
 	const char *parse = packet;
 	int retval;
 
 	/* query for vCont supported */
+	/* 处理vCont?查询:如果命令以?开头，表示GDB在查询支持的vCont操作
+	 * 		检查目标设备是否支持单步执行（step）。如果支持，则返回支持的操作列表
+	 *      发送响应给GDB，告知支持的操作
+	 *			这里返回"vCont;c;C;s;S"，表示支持以下操作：
+	 *				c：继续执行（不带信号）
+	 *				C：继续执行并传递信号
+	 *				s：单步执行（不带信号）
+	 *				S：单步执行并传递信号
+	 *		处理带分隔符的命令:如果命令以分号开头，表示命令中包含额外的参数或选项。为了简化解析，跳过分号，并减少packet_size
+	 *      
+	 */
 	if (parse[0] == '?') {
-		if (target->type->step) {
+		if (target->type->step) { 
 			/* gdb doesn't accept c without C and s without S */
 			gdb_put_packet(connection, "vCont;c;C;s;S", 13);
 			return true;
@@ -3011,6 +3107,15 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 	}
 
 	/* simple case, a continue packet */
+	/* 处理GDB发送的vCont c命令，用于继续执行目标设备,即恢复目标设备的运行
+	 *		设置标志和日志记录:设置全局变量gdb_running_type为'c'，表示当前正在处理continue命令
+	 *		设置输出标志:设置GDB连接的输出标志为GDB_OUTPUT_ALL，表示允许输出所有调试信息
+	 *		调用目标设备的继续执行函数:
+	 *		处理目标设备未暂停的情况：如果目标设备在请求恢复时并未暂停，记录一条信息，告知用户目标设备的状态
+	 *		尝试同步目标设备的内部状态：如果继续执行操作失败，调用target_poll函数尝试同步目标设备的内部状态
+	 * 		更新前端状态：即使继续执行操作失败，仍然将前端状态设置为TARGET_RUNNING，以保持与GDB的预期状态一致
+	 *		调用事件回调：调用事件回调函数，通知系统GDB已经开始执行。这可以触发其他模块或插件执行相应的操作
+	 */
 	if (parse[0] == 'c') {
 		gdb_running_type = 'c';
 		LOG_DEBUG("target %s continue", target_name(target));
@@ -3038,6 +3143,28 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 	}
 
 	/* single-step or step-over-breakpoint */
+	/* 处理GDB发送的vCont s命令，用于单步执行目标设备
+	 * 		设置标志:设置全局变量gdb_running_type为's'，表示当前正在处理step命令
+	 *		获取目标设备和线程ID:
+	 *			ct：初始化一个指向目标设备的指针ct，初始值为target
+	 *			parse++ 和 packet_size--：跳过命令中的s字符，并减少packet_size
+	 *		解析线程ID:
+	 *			parse[0] == ':'：如果命令中包含冒号（:），表示后面跟着线程ID
+	 *			strtoll：将字符串转换为64位整数，提取线程ID。endp指向转换后剩余的字符串部分
+	 *			packet_size -= endp - parse：更新packet_size，确保后续解析时不会误读已解析的部分
+	 *			thread_id = 0：如果没有提供线程ID，则默认为0，表示操作所有线程
+	 *		处理RTOS线程管理:
+	 *			target->rtos：检查目标设备是否运行RTOS（实时操作系统）。
+	 *			rtos_update_threads：更新RTOS的线程信息，确保线程状态是最新的。
+	 *			gdb_target_for_threadid：根据提供的线程ID，获取对应的目标设备指针ct。
+	 *			fake_step = true：如果要单步执行的线程不是当前的RTOS线程，则设置fake_step为true，表示需要模拟单步执行
+	 *		处理解析后的其他参数:
+	 *			';'：如果命令中包含分号（;），表示后面可能有其他参数
+	 *			'c'：如果接下来的字符是'c'，表示请求仅单步执行当前核心（core），并保持其他核心暂停
+	 *			':'：如果接下来的字符是冒号（:），表示后面跟着线程ID
+	 *			strtoll：提取线程ID并进行比较，如果与之前解析的thread_id相同，则记录调试信息，表示请求仅单步执行当前核心
+	 *			current_pc = 2：注释掉的代码，表示在某些目标架构（如aarch64）中，可以通过设置current_pc为2来实现仅单步执行当前核心的功能
+	 */
 	if (parse[0] == 's') {
 		gdb_running_type = 's';
 		bool fake_step = false;
@@ -3105,6 +3232,10 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 			}
 		}
 
+		/* 记录调试信息
+		 * 设置gdb_connection结构中的output_flag成员为GDB_OUTPUT_ALL，即接下来的操作需要向GDB发送所有的输出信息
+		 * 调用target_call_event_callbacks函数，通知所有已注册的回调函数，当前发生了TARGET_EVENT_GDB_START事件，用于通知GDB会话已经开始
+		 */
 		LOG_DEBUG("target %s single-step thread %"PRIx64, target_name(ct), thread_id);
 		gdb_connection->output_flag = GDB_OUTPUT_ALL;
 		target_call_event_callbacks(ct, TARGET_EVENT_GDB_START);
@@ -3117,6 +3248,17 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 		 * the step to not trigger an internal error in gdb. See
 		 * https://sourceware.org/bugzilla/show_bug.cgi?id=22925 for details
 		 */
+		 /* GDB有一个行为，当在GDB中切换当前线程时，它假设目标系统也能够同步地切换到相同的线程作为当前线程
+		  * 然而，在一个多线程操作系统的真实目标上，这种假设并不总是成立
+		  * 因此，代码提供了一种方法来绕过这个问题
+		  * 如果fake_step变量为真，那么代码将执行以下操作：
+		  * 	再次使用LOG_DEBUG宏记录一条调试信息，这次是为了记录伪造的单步步进操作。
+		  * 	使用snprintf格式化一个字符串，模拟从目标接收到的信号响应。
+		  *			这里的"T05"表示信号5（SIGTRAP），这是用来告诉GDB程序已经到达断点或完成了单步指令执行
+		  *			thread:后面跟着的是线程ID的十六进制表示，用来告知GDB哪个线程触发了这个信号
+		  *		通过gdb_put_packet函数将构造好的响应包发送给GDB
+		  *		设置gdb_connection的output_flag为GDB_OUTPUT_NO，这可能意味着停止进一步的输出
+		  */
 		if (fake_step) {
 			int sig_reply_len;
 			char sig_reply[128];
@@ -3133,6 +3275,16 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 		}
 
 		/* support for gdb_sync command */
+		/* GDB 同步 (gdb_sync) 处理:
+		 *		检查 gdb_sync 标志：如果 gdb_connection->sync 为真，表示GDB发出了同步请求。
+		 *		重置 sync 标志：将 gdb_connection->sync 设置为 false，以确保这个标志不会再次触发。
+		 *		检查目标状态：
+		 *			如果目标（ct）处于停止状态（TARGET_HALTED），则记录一条调试信息，表明忽略单步步进命令，并告知GDB现在会从目标获取寄存器状态。
+		 *			调用 gdb_sig_halted 函数向GDB发送一个信号，通知它目标已经停止。
+		 *			设置 gdb_connection->output_flag 为 GDB_OUTPUT_NO，阻止进一步的日志包转发。
+		 *			如果目标不是停止状态，则设置前端状态为运行中（TARGET_RUNNING）。
+		 *			返回 true：结束函数调用，表示成功处理了同步请求 	
+		 */
 		if (gdb_connection->sync) {
 			gdb_connection->sync = false;
 			if (ct->state == TARGET_HALTED) {
@@ -3145,6 +3297,15 @@ static bool gdb_handle_vcont_packet(struct connection *connection, const char *p
 			return true;
 		}
 
+		/*  执行单步步进
+		 *	错误处理:如果 target_step 返回 ERROR_TARGET_NOT_HALTED，说明尝试单步步进时目标没有处于停止状态
+		 *  成功处理：
+		 *		轮询目标：如果 target_step 成功（返回 ERROR_OK），则调用 target_poll 函数来查询目标的状态
+		 *		日志记录：如果 target_poll 失败，记录一条调试信息
+		 *		发送信号回复：调用 gdb_signal_reply 函数向GDB发送信号信息，告知其目标的状态变化
+		 *		停止日志转发：设置 gdb_connection->output_flag 为 GDB_OUTPUT_NO，防止进一步的日志信息被转发给GDB
+		 *		设置前端状态：如果 target_step 没有成功，设置前端状态为 TARGET_RUNNING，表示目标可能仍在运行
+		 */
 		retval = target_step(ct, current_pc, 0, 0);
 		if (retval == ERROR_TARGET_NOT_HALTED)
 			LOG_INFO("target %s was not halted when step was requested", target_name(ct));
@@ -3258,14 +3419,26 @@ static bool gdb_handle_vrun_packet(struct connection *connection, const char *pa
 	return true;
 }
 
+/* 处理GDB发送的以'v'开头的扩展命令包
+ * 参数：connection：指向当前连接的结构体，包含了与GDB通信所需的所有信息。
+ * packet：指向接收到的数据包内容
+ * packet_size：数据包的大小
+ */
 static int gdb_v_packet(struct connection *connection,
 		char const *packet, int packet_size)
 {
+	//获取私有数据和目标设备:从connection结构体中提取出私有数据，即与GDB连接相关的特定信息
 	struct gdb_connection *gdb_connection = connection->priv;
 	int result;
 
 	struct target *target = get_target_from_connection(connection);
 
+	/* 处理vCont命令:用于控制目标设备的执行，支持多种操作，如继续运行、单步执行、暂停等
+	 *		使用strncmp检查数据包是否以"vCont"开头，
+	 *		如果匹配，将指针packet向前移动5个字符，并减少packet_size，以便处理剩余的命令参数
+	 *		调用gdb_handle_vcont_packet函数来具体处理vCont命令,如果处理成功，handled将为true；否则为false
+	 *		如果handled为false，发送一个空响应给GDB，表示该命令未被处理
+	 */
 	if (strncmp(packet, "vCont", 5) == 0) {
 		bool handled;
 
@@ -3279,6 +3452,11 @@ static int gdb_v_packet(struct connection *connection,
 		return ERROR_OK;
 	}
 
+	/* 处理vRun命令：用于启动目标设备的执行，通常在调试会话开始时使用。可以指定启动时的行为，如加载初始程序、设置断点等
+	 * 		使用strncmp检查数据包是否以"vRun"开头
+	 *		如果匹配，直接调用gdb_handle_vrun_packet函数来处理vRun命令。如果处理成功，handled将为true；否则为false
+	 *      如果handled为false，发送一个空响应给GDB，表示该命令未被处理
+	 */
 	if (strncmp(packet, "vRun", 4) == 0) {
 		bool handled;
 
@@ -3290,12 +3468,30 @@ static int gdb_v_packet(struct connection *connection,
 	}
 
 	/* if flash programming disabled - send a empty reply */
-
+	/* 检查flash编程是否启用:
+	 * 如果gdb_flash_program为0，表示闪存编程被禁用
+	 * 在这种情况下，直接发送一个空响应给GDB，并返回ERROR_OK，表示处理完成
+	 */
 	if (gdb_flash_program == 0) {
 		gdb_put_packet(connection, "", 0);
 		return ERROR_OK;
 	}
 
+	/* 处理vFlashErase命令:用于指定要擦除的闪存地址和长度
+	 * 格式为vFlashErase:addr,length
+	 * 		解析命令参数:
+	 *			将指针parse指向命令参数部分（跳过"vFlashErase:"前缀）
+	 *          检查命令是否完整，如果命令为空或格式不正确，记录错误并关闭连接
+	 *			使用strtoul函数将地址和长度从字符串转换为无符号长整型
+	 *			确保地址和长度之间有一个逗号分隔符，并且没有多余的字符	
+	 *      设置脏标志:
+	 *			调用flash_set_dirty()函数标记Flash为dirty状态，表示需要重新写入。可以防止在多次调用flash_write时出现问题
+	 *			触发事件回调:触发TARGET_EVENT_GDB_FLASH_ERASE_START事件,允许目标设备执行任何必要的预擦除操作
+	 *			执行擦除操作:调用flash_erase_address_range函数执行实际的擦除操作。参数包括目标设备、是否强制擦除（false表示非强制）、起始地址和长度
+	 *			触发事件回调:触发TARGET_EVENT_GDB_FLASH_ERASE_END事件。这允许目标设备执行任何必要的擦除后的处理操作
+	 *			处理擦除结果:如果擦除操作成功，发送"OK"响应给GDB;如果擦除操作失败，发送I/O错误响应给GDB，并记录详细的错误信息
+	 *
+	 */
 	if (strncmp(packet, "vFlashErase:", 12) == 0) {
 		unsigned long addr;
 		unsigned long length;
@@ -3352,6 +3548,20 @@ static int gdb_v_packet(struct connection *connection,
 		return ERROR_OK;
 	}
 
+	/* 处理vFlashWrite命令：用于指定要写入闪存的数据，格式为vFlashWrite:addr:data
+	 * 		解析命令参数:
+	 *			将指针parse指向命令参数部分（跳过"vFlashWrite:"前缀）
+	 *          检查命令是否完整，如果命令为空或格式不正确，记录错误并关闭连接
+	 *			使用strtoul函数将地址从字符串转换为无符号长整型
+	 *			确保地址和长度之间有一个冒号分隔符，并且没有多余的字符
+	 *			计算实际数据的长度	
+	 *			创建或更新内存映像：如果当前没有创建映像，则分配内存并调用image_open函数初始化一个新的映像
+	 *               image_open函数通常用于打开或创建一个映像文件，这里使用空字符串和"build"模式来创建一个临时的内存映像
+	 *			添加数据到映像：image_add_section函数将接收到的数据添加到内存映像的一个新节区中
+	 *			 	 参数包括：gdb_connection->vflash_image指向内存映像的指针，(uint8_t const *)parse指向数据的指针
+	 *			发送响应：发送"OK"响应给GDB，表示写入操作成功完成。2表示响应字符串的长度
+	 *
+	 */
 	if (strncmp(packet, "vFlashWrite:", 12) == 0) {
 		int retval;
 		unsigned long addr;
@@ -3386,6 +3596,17 @@ static int gdb_v_packet(struct connection *connection,
 		return ERROR_OK;
 	}
 
+	/* 处理vFlashDone命令：用于指示GDB已完成数据传输，并请求将这些数据写入目标设备的Flash，
+	 * 		初始化变量:written用于存储实际写入闪存的字节数
+	 *		调用事件回调:调用目标设备的事件回调函数，通知系统即将开始闪存写入操作
+	 *			TARGET_EVENT_GDB_FLASH_WRITE_START在写入开始前调用
+	 *			TARGET_EVENT_GDB_FLASH_WRITE_END：在写入结束后调用
+	 *		执行闪存写入:调用此函数将内存映像中的数据写入目标设备的闪存
+	 *		处理写入结果:如果写入操作失败，根据具体的错误码采取不同的处理方式
+	 *			ERROR_FLASH_DST_OUT_OF_BANK：如果错误是由于目标地址超出闪存范围，发送"E.memtype"错误响应
+	 *			其他错误：发送通用的I/O错误响应
+	 *		清理资源:关闭并释放内存映像资源、释放分配的内存、将指针置为NULL
+	 */
 	if (strncmp(packet, "vFlashDone", 10) == 0) {
 		uint32_t written;
 
@@ -3502,11 +3723,22 @@ static void gdb_sig_halted(struct connection *connection)
 	gdb_put_packet(connection, sig_reply, 3);
 }
 
+//负责解析和响应来自GDB的命令
 static int gdb_input_inner(struct connection *connection)
 {
 	/* Do not allocate this on the stack */
+	/* 定义了一个静态缓冲区gdb_packet_buffer，它的大小为GDB_BUFFER_SIZE加上一个额外的字节用于字符串的终止符('\0')
+	 * 使用静态变量意味着这个缓冲区在整个程序的生命周期内都存在，不会随着函数调用结束而被销毁
+	 */
 	static char gdb_packet_buffer[GDB_BUFFER_SIZE + 1]; /* Extra byte for null-termination */
 
+	/* target：指向当前连接对应的目标设备结构体。
+	 * packet：指向gdb_packet_buffer，用于后续作为读取到的数据包内容的指针。
+	 * packet_size：表示接收到的数据包的大小。
+	 * retval：用于存储各个操作的结果，通常用来检查是否发生错误。
+	 * gdb_con：从connection结构体的私有数据成员priv中获取，它包含了与GDB连接相关的具体信息。
+	 * warn_use_ext：一个静态布尔值，用于跟踪是否已经发出过关于使用扩展协议的警告
+	 */
 	struct target *target;
 	char const *packet = gdb_packet_buffer;
 	int packet_size;
@@ -3514,6 +3746,7 @@ static int gdb_input_inner(struct connection *connection)
 	struct gdb_connection *gdb_con = connection->priv;
 	static bool warn_use_ext;
 
+	//根据传入的connection参数获取对应的target对象
 	target = get_target_from_connection(connection);
 
 	/* drain input buffer. If one of the packets fail, then an error
@@ -3527,20 +3760,45 @@ static int gdb_input_inner(struct connection *connection)
 	 * If the error is recoverable, this fn is called again to
 	 * drain the rest of the buffer.
 	 */
+	 //循环不断尝试读取并处理GDB发送过来的数据包，直到满足某些停止条件(如没有更多数据或发生了不可恢复的错误)
 	do {
+		//packet_size被初始化为GDB_BUFFER_SIZE，这是缓冲区的最大容量
+		//gdb_get_packet函数用于从连接中读取一个完整的GDB数据包，并将其存储在gdb_packet_buffer中
+		//该函数还会更新packet_size以反映实际读取到的数据量
 		packet_size = GDB_BUFFER_SIZE;
 		retval = gdb_get_packet(connection, gdb_packet_buffer, &packet_size);
 		if (retval != ERROR_OK)
 			return retval;
 
 		/* terminate with zero */
+		//在数据包的末尾添加了一个空字符（\0）
 		gdb_packet_buffer[packet_size] = '\0';
 
+		//只有当接收到的数据包长度大于0时，才会继续处理
+		//如果packet_size为0，意味着没有接收到有效数据，此时不会执行任何操作
 		if (packet_size > 0) {
-
+			
+			//调用gdb_log_incoming_packet函数记录接收到的数据包内容
 			gdb_log_incoming_packet(connection, gdb_packet_buffer);
 
 			retval = ERROR_OK;
+			/* 根据数据包的第一个字符（命令类型）来分发不同的处理逻辑
+			 * 'T':线程是否存活
+			 * 'H':设置当前线程('c'为step/continue，'g'为所有操作)
+			 * 'q'或 'Q':查询命令,首先尝试通过gdb_thread_packet处理线程相关的查询，如果未被消耗(GDB_THREAD_PACKET_NOT_CONSUMED)，则调用gdb_query_packet处理其他类型的查询
+			 * 'g'、'G'、'p'、'P':依次为获取所有寄存器的值、设置所有寄存器的值、获取单个寄存器的值、设置单个寄存器的值
+			 * 'm'、'M':依次为读取内存、写入内存
+			 * 'z'或'Z'：删除或插入断点/观察点
+			 * '?'：查询最后一次导致目标停下的信号。由gdb_last_signal_packet处理。此外如果检测到用户使用的是非扩展协议，会发出一条警告，建议使用扩展协议
+			 * 'c'或's'：分别表示继续运行和单步执行
+			 * 'v':处理各种扩展命令，如文件I/O等。由gdb_v_packet处理
+			 * 'D':处理GDB断开连接的请求。由gdb_detach处理
+			 * 'X':写入二进制数据到内存。由gdb_write_memory_binary_packet处理
+			 * 'k':处理GDB关闭连接的请求。如果启用了扩展协议，则只是标记为未附加；否则，直接返回ERROR_SERVER_REMOTE_CLOSED
+			 * '!':启用扩展远程协议。由gdb_con->extended_protocol标志控制，并回应OK
+			 * 'R':处理重启目标设备的请求。由gdb_restart_inferior处理
+			 * 'F':用于处理文件I/O扩展
+			 */
 			switch (packet[0]) {
 				case 'T':	/* Is thread alive? */
 					gdb_thread_packet(connection, packet, packet_size);
@@ -3589,9 +3847,12 @@ static int gdb_input_inner(struct connection *connection)
 				case 'c':
 				case 's':
 				{
+					//调用线程相关函数，处理与线程相关的命令，确保当前线程设置正确
 					gdb_thread_packet(connection, packet, packet_size);
+					//设置输出标志
 					gdb_con->output_flag = GDB_OUTPUT_ALL;
 
+					//检查内存写入错误:如果之前有内存写入失败的情况，会记录一个错误，并清除该错误状态,确保后续的操作不会受到之前的错误影响
 					if (gdb_con->mem_write_error) {
 						LOG_ERROR("Memory write failure!");
 
@@ -3600,18 +3861,24 @@ static int gdb_input_inner(struct connection *connection)
 						gdb_con->mem_write_error = false;
 					}
 
+					//检查目标设备的当前状态，并根据状态决定如何响应'c'或's'命令
 					bool nostep = false;
 					bool already_running = false;
+					//目标已经在运行:如果目标设备已经在运行，发出警告并设置already_running为true
 					if (target->state == TARGET_RUNNING) {
 						LOG_WARNING("WARNING! The target is already running. "
 								"All changes GDB did to registers will be discarded! "
 								"Waiting for target to halt.");
 						already_running = true;
 					} else if (target->state != TARGET_HALTED) {
+					//目标既不在运行也不在暂停状态:如果目标设备既不在运行状态也不在暂停状态，发出警告并设置nostep为true
+					//这种情况下，'c'或's'命令将被忽略，因为目标设备可能处于某种不稳定的中间状态
 						LOG_WARNING("The target is not in the halted nor running stated, "
 								"stepi/continue ignored.");
 						nostep = true;
 					} else if ((packet[0] == 's') && gdb_con->sync) {
+					//单步执行时的同步问题:当用户在GDB中发出continue命令时，GDB可能会先发送一个stepi命令给OpenOCD，从而绕过了单步执行的同步检查。
+					//为了避免这种情况，这里直接忽略stepi命令，并允许GDB从目标设备获取最新的寄存器状态
 						/* Hmm..... when you issue a continue in GDB, then a "stepi" is
 						 * sent by GDB first to OpenOCD, thus defeating the check to
 						 * make only the single stepping have the sync feature...
@@ -3622,6 +3889,7 @@ static int gdb_input_inner(struct connection *connection)
 					}
 					gdb_con->sync = false;
 
+					//根据状态采取不同行动
 					if (!already_running && nostep) {
 						/* Either the target isn't in the halted state, then we can't
 						 * step/continue. This might be early setup, etc.
@@ -3630,6 +3898,9 @@ static int gdb_input_inner(struct connection *connection)
 						 * register values without modifying the target state.
 						 *
 						 */
+						 /* 如果目标既不在运行也不在暂停状态：调用gdb_sig_halted函数，模拟目标设备已暂停的状态
+						  * 这可能是为了允许GDB获取最新的寄存器状态，而不实际改变目标设备的状态
+						  */
 						gdb_sig_halted(connection);
 
 						/* stop forwarding log packets! */
@@ -3638,6 +3909,12 @@ static int gdb_input_inner(struct connection *connection)
 						/* We're running/stepping, in which case we can
 						 * forward log output until the target is halted
 						 */
+						 /* 如果目标正在运行或可以继续/单步执行：
+						  * 将前端状态设置为TARGET_RUNNING，表示目标设备正在运行
+						  * 调用target_call_event_callbacks函数，触发与GDB启动相关的事件回调
+						  * 如果目标之前不在运行状态，调用gdb_step_continue_packet函数来实际执行继续或单步操作。
+						  * 如果这个操作失败，则调用gdb_frontend_halted函数，模拟目标设备已暂停的状态，以避免GDB等待一个永远不会到来的暂停条件
+						  */
 						gdb_con->frontend_state = TARGET_RUNNING;
 						target_call_event_callbacks(target, TARGET_EVENT_GDB_START);
 
@@ -3682,7 +3959,10 @@ static int gdb_input_inner(struct connection *connection)
 					/* handle extended restart packet */
 					gdb_restart_inferior(connection, packet, packet_size);
 					break;
-
+				/* 已弃用
+				 * 'j':主要用于多核系统(如Cortex-A)，允许GDB知道哪个核心正在被调试;gdb_read_smp_packet用于从目标设备读取当前活动的核心ID，并将该信息发送给GDB
+			 	 * 'J':主要用于多核系统，允许GDB指定哪个核心应该在下一步操作中被激活,gdb_write_smp_packet用于设置在下一次恢复执行时应该使用的核心ID
+				 */
 				case 'j':
 					/* DEPRECATED */
 					/* packet supported only by smp target i.e cortex_a.c*/
@@ -3706,6 +3986,15 @@ static int gdb_input_inner(struct connection *connection)
 					 * The format of 'F' response packet is
 					 * Fretcode,errno,Ctrl-C flag;call-specific attachment
 					 */
+					 /* 当GDB在主机侧完成了一个系统调用（例如读写文件）后，它会通过'F'包将系统调用的返回值发送回目标设备,
+					  * 格式：Fretcode,errno,Ctrl-C flag;call-specific attachment，
+					  * 其中：retcode系统调用的返回值、errno错误码、Ctrl-C flag表示是否检测到了Ctrl-C信号
+					  * call-specific attachment 是与特定系统调用相关的信息
+					  * 处理逻辑：
+					  * 	将前端状态设置为TARGET_RUNNING，表示目标设备正在运行
+					  * 	设置输出标志为GDB_OUTPUT_ALL，允许所有日志输出
+					  * 	调用gdb_fileio_response_packet函数来处理这个文件I/O响应包，通常涉及更新目标设备的状态和发送适当的响应给GDB
+					  */
 					gdb_con->frontend_state = TARGET_RUNNING;
 					gdb_con->output_flag = GDB_OUTPUT_ALL;
 					gdb_fileio_response_packet(connection, packet, packet_size);

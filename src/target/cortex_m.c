@@ -417,14 +417,18 @@ static int cortex_m_store_core_reg_u32(struct target *target,
 static int cortex_m_write_debug_halt_mask(struct target *target,
 	uint32_t mask_on, uint32_t mask_off)
 {
+	//获取 Cortex-M 和 ARMv7-M 结构体
 	struct cortex_m_common *cortex_m = target_to_cm(target);
 	struct armv7m_common *armv7m = &cortex_m->armv7m;
 
 	/* mask off status bits */
+	//清除 DCB_DHCSR 寄存器中第 16 到 31 位的状态位,清除由 mask_off 指定的位为0
 	cortex_m->dcb_dhcsr &= ~((0xFFFFul << 16) | mask_off);
 	/* create new register mask */
+	//调试密钥、启用调试功能的位、设置由 mask_on 指定的位为1
 	cortex_m->dcb_dhcsr |= DBGKEY | C_DEBUGEN | mask_on;
 
+	//写入调试控制寄存器
 	return mem_ap_write_atomic_u32(armv7m->debug_ap, DCB_DHCSR, cortex_m->dcb_dhcsr);
 }
 
@@ -483,6 +487,15 @@ static int cortex_m_set_maskints_for_run(struct target *target)
 	return ERROR_OK;
 }
 
+/* 设置中断屏蔽
+ * 实现流程：
+ *		获取中断屏蔽模式：target_to_cm(target)->isrmasking_mode
+ *		根据模式设置中断屏蔽：
+ *			CORTEX_M_ISRMASK_AUTO：假设自动中断处理已经完成，直接调用 cortex_m_set_maskints 函数将中断屏蔽（true 表示屏蔽中断）
+ *			CORTEX_M_ISRMASK_OFF：中断永远不会被屏蔽，调用 cortex_m_set_maskints 函数将中断不屏蔽（false 表示不屏蔽中断）
+ *			CORTEX_M_ISRMASK_ON：中断总是被屏蔽，调用 cortex_m_set_maskints 函数将中断屏蔽（true 表示屏蔽中断）
+ *			CORTEX_M_ISRMASK_STEPONLY：仅在单步执行时屏蔽中断，调用 cortex_m_set_maskints 函数将中断屏蔽（true 表示屏蔽中断）
+ */
 static int cortex_m_set_maskints_for_step(struct target *target)
 {
 	switch (target_to_cm(target)->isrmasking_mode) {
@@ -1271,7 +1284,7 @@ static int cortex_m_step(struct target *target, int current,
 			 * instruction, with interrupts on or off as appropriate. */
 			//用于设置适当的中断屏蔽状态，以便正确执行单步操作
 			cortex_m_set_maskints_for_step(target);
-			//用于向目标设备写入调试控制寄存器中的停止（C_HALT）和单步（C_STEP）标志
+			//调试控制寄存器：停止C_HALT置0和单步C_STEP置1  on off
 			cortex_m_write_debug_halt_mask(target, C_STEP, C_HALT);
 		} else {
 			/* Process interrupts during stepping in a way they don't interfere
