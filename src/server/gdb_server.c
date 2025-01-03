@@ -1537,6 +1537,13 @@ static int gdb_error(struct connection *connection, int retval)
 /* We don't have to worry about the default 2 second timeout for GDB packets,
  * because GDB breaks up large memory reads into smaller reads.
  */
+ /* 负责解析 GDB 发送的二进制格式的内存读取请求，从目标设备的内存中读取数据，并将读取到的数据以十六进制格式返回给 GDB
+  * addr：表示要读取的起始地址（64 位无符号整数）
+  * len：表示要读取的数据长度（32 位无符号整数）
+  * buffer：用于存储从目标设备读取的原始数据
+  * hex_buffer：用于存储转换后的十六进制字符串，最终发送给 GDB
+  * 
+  */
 static int gdb_read_memory_packet(struct connection *connection,
 		char const *packet, int packet_size)
 {
@@ -1568,6 +1575,7 @@ static int gdb_read_memory_packet(struct connection *connection,
 		return ERROR_OK;
 	}
 
+	//为读取的数据分配一个 len 大小的缓冲区 buffer。这个缓冲区将用于存储从目标设备读取的原始数据
 	buffer = malloc(len);
 
 	LOG_DEBUG("addr: 0x%16.16" PRIx64 ", len: 0x%8.8" PRIx32 "", addr, len);
@@ -1597,6 +1605,11 @@ static int gdb_read_memory_packet(struct connection *connection,
 	}
 
 	if (retval == ERROR_OK) {
+		/* malloc(len * 2 + 1)：为转换后的十六进制字符串分配足够的空间。每个字节需要两个字符来表示，因此 len * 2 是所需的字符数，再加上一个终止符 \0。
+		 * hexify：将 buffer 中的原始数据转换为十六进制字符串，并存储在 hex_buffer 中。pkt_len 是转换后字符串的实际长度。
+		 * gdb_put_packet：将转换后的十六进制字符串发送给 GDB。
+         * free(hex_buffer)：释放 hex_buffer 的内存
+		 */
 		hex_buffer = malloc(len * 2 + 1);
 
 		size_t pkt_len = hexify(hex_buffer, buffer, len, len * 2 + 1);
@@ -1663,6 +1676,29 @@ static int gdb_write_memory_packet(struct connection *connection,
 	return retval;
 }
 
+/* 负责解析 GDB 发送的二进制格式的内存写入请求，并将数据写入目标设备的内存中
+ * separator：用于解析 packet 中的分隔符，指向解析后的下一个字符，即地址部分的结束位置
+ * fast_limit：定义了一个阈值，表示当写入数据长度大于或等于这个值时，GDB 会立即确认写入操作，以加快下载速度
+ * 实现流程：
+ * 		跳过命令字符
+ *		解析地址
+ *		检查分隔符：检查 separator 指向的字符是否为逗号（,），这是地址和长度之间的分隔符
+ *		解析长度：
+ *		检查分隔符：检查 separator 指向的字符是否为冒号（:），这是长度和数据之间的分隔符
+ *		获取 GDB 连接对象：
+ *		检查内存写入错误：
+ *		快速确认大写入：发送一个确认包（"OK"）给 GDB，表示写入操作已经开始。这可以加速下载过程，因为 GDB 可以在等待确认的同时继续发送新的数据包
+ *		实际写入内存:
+ *			记录调试信息，显示要写入的地址和长度
+ *			如果目标设备运行了实时操作系统（RTOS），尝试使用 RTOS 特定的写入函数 rtos_write_buffer 来写入数据
+ *			如果 rtos_write_buffer 不可用（返回 ERROR_NOT_IMPLEMENTED），则使用通用的 target_write_buffer 函数来写入数据
+ *			gdb_connection->mem_write_error = true：如果写入操作失败，设置内存写入错误标志，以便后续处理
+ *		处理小写入:
+ *			对于小于 fast_limit 的写入操作，GDB 不会立即确认写入。因此，需要在写入完成后发送确认包或错误信息
+ *			如果写入失败，发送错误信息给 GDB，并清除内存写入错误标志
+ *			如果写入成功，发送确认包（"OK"）给 GDB
+ *			
+ */
 static int gdb_write_memory_binary_packet(struct connection *connection,
 		char const *packet, int packet_size)
 {
@@ -1709,6 +1745,7 @@ static int gdb_write_memory_binary_packet(struct connection *connection,
 			 */
 			gdb_put_packet(connection, "OK", 2);
 		}
+	//处理内存写入错误:发送错误信息给 GDB，并根据 retval 设置相应的错误码;清除内存写入错误标志
 	} else {
 		retval = gdb_error(connection, retval);
 		/* now that we have reported the memory write error, we can clear the condition */
