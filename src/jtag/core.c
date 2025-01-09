@@ -611,10 +611,15 @@ void jtag_add_clocks(int num_cycles)
 	}
 }
 
+/* 用于处理系统复位请求，特别是通过 SRST（System Reset）信号
+ * int req_srst: 输入参数，指示是否需要触发SRST信号
+ * 
+ */
 static int adapter_system_reset(int req_srst)
 {
 	int retval;
 
+	//检查 jtag_reset_config 是否包含 RESET_HAS_SRST 标志
 	if (req_srst) {
 		if (!(jtag_reset_config & RESET_HAS_SRST)) {
 			LOG_ERROR("BUG: can't assert SRST");
@@ -624,6 +629,16 @@ static int adapter_system_reset(int req_srst)
 	}
 
 	/* Maybe change SRST signal state */
+	/* 改变SRST信号状态：
+	 * 		检查当前的 SRST 状态 (jtag_srst) 是否与请求的 SRST 状态 (req_srst) 不同。
+     *      如果不同，则调用 adapter_driver->reset(0, req_srst) 来改变 SRST 状态。
+     *      	adapter_driver 是一个指向结构体的指针，该结构体包含驱动程序的操作函数。
+     *      	reset() 函数的参数1是 TRST（Test Reset）信号的状态，这里传入 0 表示不需要改变 TRST 状态；参数2是 SRST 信号的状态。
+     *      如果 reset() 函数返回值不是 ERROR_OK，则记录错误日志并返回 ERROR_FAIL。
+     *      更新 jtag_srst 以反映新的 SRST 状态。
+     *      	如果 req_srst 为真（即 SRST 被置位），则记录调试信息，并根据 adapter_nsrst_assert_width 延迟一段时间（单位为毫秒）。
+     *      	如果 req_srst 为假（即 SRST 被释放），则记录调试信息，并根据 adapter_nsrst_delay 延迟一段时间（单位为毫秒）。
+	 */
 	if (jtag_srst != req_srst) {
 		retval = adapter_driver->reset(0, req_srst);
 		if (retval != ERROR_OK) {
